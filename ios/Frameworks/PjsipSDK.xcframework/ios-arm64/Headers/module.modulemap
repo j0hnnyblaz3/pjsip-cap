@@ -1,0 +1,5 @@
+module PjsipSDK {
+    header "pjsua.h"
+    link "PjsipSDK"
+    export *
+}

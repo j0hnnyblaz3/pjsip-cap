@@ -14,4 +14,15 @@ Pod::Spec.new do |s|
   s.ios.deployment_target = '15.0'
   s.dependency 'Capacitor'
   s.swift_version = '5.1'
+
+  # PJSIP built from source (via scripts/build-ios.sh)
+  s.vendored_frameworks = 'ios/Frameworks/PjsipSDK.xcframework'
+  s.frameworks = 'CallKit', 'PushKit', 'AVFoundation', 'AudioToolbox', 'CFNetwork', 'Security'
+  s.libraries = 'c++'
+
+  # Suppress warnings from PJSIP headers
+  s.pod_target_xcconfig = {
+    'OTHER_LDFLAGS' => '-ObjC',
+    'HEADER_SEARCH_PATHS' => '$(inherited) "${PODS_ROOT}/../../ios/Frameworks/PjsipSDK.xcframework/Headers"'
+  }
 end

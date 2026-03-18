@@ -2,6 +2,9 @@
 dist
 node_modules
 
+# PJSIP build artifacts
+build/
+
 # iOS files
 Pods
 Podfile.lock

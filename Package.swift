@@ -17,9 +17,24 @@ let package = Package(
             name: "PjsipPlugin",
             dependencies: [
                 .product(name: "Capacitor", package: "capacitor-swift-pm"),
-                .product(name: "Cordova", package: "capacitor-swift-pm")
+                .product(name: "Cordova", package: "capacitor-swift-pm"),
+                "PjsipSDK"
             ],
-            path: "ios/Sources/PjsipPlugin"),
+            path: "ios/Sources/PjsipPlugin",
+            linkerSettings: [
+                .linkedFramework("CallKit"),
+                .linkedFramework("PushKit"),
+                .linkedFramework("AVFoundation"),
+                .linkedFramework("AudioToolbox"),
+                .linkedFramework("CFNetwork"),
+                .linkedFramework("Security"),
+                .linkedLibrary("c++"),
+            ]
+        ),
+        .binaryTarget(
+            name: "PjsipSDK",
+            path: "ios/Frameworks/PjsipSDK.xcframework"
+        ),
         .testTarget(
             name: "PjsipPluginTests",
             dependencies: ["PjsipPlugin"],
