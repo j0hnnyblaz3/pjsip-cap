@@ -20,10 +20,7 @@
   "license": "UNLICENSED",
   "repository": {
     "type": "git",
-    "url": "git+http://none.git"
-  },
-  "bugs": {
-    "url": "http://none/issues"
+    "url": "git+ssh://git@git.jonathanblaisure.com/jblaisure/cap-pjsip.git"
   },
   "keywords": [
     "capacitor",
@@ -44,6 +41,7 @@
     "build": "npm run clean && npm run docgen && tsc && rollup -c rollup.config.mjs",
     "clean": "rimraf ./dist",
     "watch": "tsc --watch",
+    "prepare": "npm run build",
     "prepublishOnly": "npm run build"
   },
   "devDependencies": {
