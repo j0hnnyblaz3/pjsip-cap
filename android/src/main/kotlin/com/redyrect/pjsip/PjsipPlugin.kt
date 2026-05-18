@@ -1,5 +1,6 @@
 package com.redyrect.pjsip
 
+import com.getcapacitor.JSArray
 import com.getcapacitor.JSObject
 import com.getcapacitor.Plugin
 import com.getcapacitor.PluginCall
@@ -134,6 +135,17 @@ class PjsipPlugin : Plugin() {
         sipManager.hangupCall(callId)
         CallConnectionService.reportCallEnded(callId)
         call.resolve()
+    }
+
+    @PluginMethod
+    fun getActiveCalls(call: PluginCall) {
+        val arr = JSArray()
+        for (c in sipManager.getActiveCalls()) {
+            val o = JSObject()
+            for ((k, v) in c) o.put(k, v)
+            arr.put(o)
+        }
+        call.resolve(JSObject().apply { put("calls", arr) })
     }
 
     // In-call controls

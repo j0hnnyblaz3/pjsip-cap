@@ -469,6 +469,29 @@ class SipManager: NSObject {
         }
     }
 
+    /// Snapshot every call PJSIP is still tracking, for client-side
+    /// recovery after a webview reload. Authoritative: state/remote come
+    /// straight from `pjsua_call_get_info`, not cached bookkeeping.
+    func getActiveCalls() -> [[String: Any]] {
+        var calls: [[String: Any]] = []
+        for (pluginCallId, pjCallId) in reverseCallMap {
+            guard let info = getCallInfo(pjCallId) else { continue }
+            if info.state == PJSIP_INV_STATE_DISCONNECTED
+                || info.state == PJSIP_INV_STATE_NULL { continue }
+            let remoteUri = pjStringToSwift(info.remote_info)
+            var entry: [String: Any] = [
+                "callId": pluginCallId,
+                "state": mapCallState(info.state),
+            ]
+            if !remoteUri.isEmpty { entry["remoteUri"] = remoteUri }
+            if let name = extractDisplayName(from: remoteUri) {
+                entry["callerName"] = name
+            }
+            calls.append(entry)
+        }
+        return calls
+    }
+
     // MARK: - Helpers
 
     private func getCallInfo(_ pjCallId: pjsua_call_id) -> pjsua_call_info? {

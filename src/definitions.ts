@@ -61,6 +61,21 @@ export interface PushTokenEvent {
   platform: PushPlatform;
 }
 
+// --- Recovery ---
+
+/**
+ * A call the engine currently knows about. Returned by `getActiveCalls`
+ * so a client that lost its in-memory state (web hot-reload, native
+ * background→resume after the OS reclaimed the webview) can re-adopt
+ * in-flight calls instead of orphaning them.
+ */
+export interface ActiveCall {
+  callId: string;
+  state: CallState;
+  remoteUri?: string;
+  callerName?: string;
+}
+
 // --- Plugin Interface ---
 
 export interface PjsipPlugin {
@@ -73,6 +88,13 @@ export interface PjsipPlugin {
   makeCall(options: { uri: string }): Promise<{ callId: string }>;
   answerCall(options: { callId: string }): Promise<void>;
   hangupCall(options: { callId: string }): Promise<void>;
+
+  /**
+   * Enumerate calls the engine is currently tracking. Used for call
+   * recovery: a freshly-(re)loaded client queries this on init and
+   * re-adopts any in-flight call so it stays controllable.
+   */
+  getActiveCalls(): Promise<{ calls: ActiveCall[] }>;
 
   // In-call controls
   holdCall(options: { callId: string; hold: boolean }): Promise<void>;

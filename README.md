@@ -32,6 +32,7 @@ npx cap sync
 * [`makeCall(...)`](#makecall)
 * [`answerCall(...)`](#answercall)
 * [`hangupCall(...)`](#hangupcall)
+* [`getActiveCalls()`](#getactivecalls)
 * [`holdCall(...)`](#holdcall)
 * [`muteCall(...)`](#mutecall)
 * [`sendDtmf(...)`](#senddtmf)
@@ -121,6 +122,21 @@ hangupCall(options: { callId: string; }) => Promise<void>
 | Param         | Type                             |
 | ------------- | -------------------------------- |
 | **`options`** | <code>{ callId: string; }</code> |
+
+--------------------
+
+
+### getActiveCalls()
+
+```typescript
+getActiveCalls() => Promise<{ calls: ActiveCall[]; }>
+```
+
+Enumerate calls the engine is currently tracking. Used for call
+recovery: a freshly-(re)loaded client queries this on init and
+re-adopts any in-flight call so it stays controllable.
+
+**Returns:** <code>Promise&lt;{ calls: ActiveCall[]; }&gt;</code>
 
 --------------------
 
@@ -289,6 +305,21 @@ addListener(event: 'pushTokenUpdated', listener: (data: PushTokenEvent) => void)
 | **`pushToken`** | <code>string</code>                                   |
 
 
+#### ActiveCall
+
+A call the engine currently knows about. Returned by `getActiveCalls`
+so a client that lost its in-memory state (web hot-reload, native
+background→resume after the OS reclaimed the webview) can re-adopt
+in-flight calls instead of orphaning them.
+
+| Prop             | Type                                            |
+| ---------------- | ----------------------------------------------- |
+| **`callId`**     | <code>string</code>                             |
+| **`state`**      | <code><a href="#callstate">CallState</a></code> |
+| **`remoteUri`**  | <code>string</code>                             |
+| **`callerName`** | <code>string</code>                             |
+
+
 #### PluginListenerHandle
 
 | Prop         | Type                                      |
@@ -343,14 +374,14 @@ addListener(event: 'pushTokenUpdated', listener: (data: PushTokenEvent) => void)
 <code>'unregistered' | 'registering' | 'registered' | 'unregistering' | 'failed'</code>
 
 
-#### AudioRoute
-
-<code>'speaker' | 'earpiece' | 'bluetooth'</code>
-
-
 #### CallState
 
 <code>'calling' | 'incoming' | 'early' | 'connecting' | 'confirmed' | 'disconnected' | 'held'</code>
+
+
+#### AudioRoute
+
+<code>'speaker' | 'earpiece' | 'bluetooth'</code>
 
 
 #### PushPlatform

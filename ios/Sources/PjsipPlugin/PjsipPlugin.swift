@@ -12,6 +12,7 @@ public class PjsipPlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "makeCall", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "answerCall", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "hangupCall", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "getActiveCalls", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "holdCall", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "muteCall", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "sendDtmf", returnType: CAPPluginReturnPromise),
@@ -127,6 +128,10 @@ public class PjsipPlugin: CAPPlugin, CAPBridgedPlugin {
         sipManager.hangupCall(callId: callId)
         callKitManager.reportCallEnded(callId: callId)
         call.resolve()
+    }
+
+    @objc func getActiveCalls(_ call: CAPPluginCall) {
+        call.resolve(["calls": sipManager.getActiveCalls()])
     }
 
     // MARK: - In-call controls

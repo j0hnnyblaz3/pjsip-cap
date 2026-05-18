@@ -15,6 +15,7 @@ import type {
   RegistrationState,
   CallState,
   AudioRoute,
+  ActiveCall,
 } from './definitions';
 
 export class PjsipWeb extends WebPlugin implements PjsipPlugin {
@@ -145,6 +146,27 @@ export class PjsipWeb extends WebPlugin implements PjsipPlugin {
         break;
     }
     this.sessions.delete(options.callId);
+  }
+
+  async getActiveCalls(): Promise<{ calls: ActiveCall[] }> {
+    const calls: ActiveCall[] = [];
+    for (const [callId, session] of this.sessions) {
+      // Terminated sessions are pruned in setupSessionListeners, but
+      // guard anyway so a recovering client never re-adopts a dead call.
+      if (session.state === SessionState.Terminated) continue;
+      const state = this.mapSessionState(session.state) ?? 'connecting';
+      let remoteUri: string | undefined;
+      let callerName: string | undefined;
+      try {
+        remoteUri = session.remoteIdentity?.uri?.toString();
+        callerName = session.remoteIdentity?.displayName || undefined;
+      } catch {
+        // remoteIdentity can be unavailable very early in an Inviter's
+        // lifecycle — fine, the callId alone still makes it controllable.
+      }
+      calls.push({ callId, state, remoteUri, callerName });
+    }
+    return { calls };
   }
 
   async holdCall(options: { callId: string; hold: boolean }): Promise<void> {
