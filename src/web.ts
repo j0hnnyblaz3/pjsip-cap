@@ -41,6 +41,14 @@ export class PjsipWeb extends WebPlugin implements PjsipPlugin {
       transportOptions: {
         server: wsServer,
       },
+      // Cap the ICE-gathering wait. sip.js defaults to 5000ms and many
+      // browsers/networks never fire `icegatheringstatechange: complete`,
+      // so the offer/answer SDP (and thus the INVITE / 200 OK) stalls the
+      // full 5s — the visible "buttons lag ~5 seconds" symptom. Host +
+      // srflx candidates gather in well under a second; 1s is a safe cap.
+      sessionDescriptionHandlerFactoryOptions: {
+        iceGatheringTimeout: 1000,
+      },
       delegate: {
         onInvite: (invitation: Invitation) => {
           this.handleIncomingCall(invitation);
@@ -113,8 +121,18 @@ export class PjsipWeb extends WebPlugin implements PjsipPlugin {
     this.sessions.set(callId, inviter);
     this.setupSessionListeners(callId, inviter);
 
-    await inviter.invite();
+    // Emit 'calling' and return the id IMMEDIATELY. Do not block the
+    // caller on inviter.invite(): it internally waits for ICE gathering
+    // (capped by iceGatheringTimeout above) before the INVITE goes out,
+    // which would otherwise freeze the UI until the SDP is ready. The
+    // session.stateChange listeners drive every subsequent state; a
+    // failed invite is surfaced as 'disconnected' so the UI recovers.
     this.notifyCallState(callId, 'calling', options.uri);
+    inviter.invite().catch((err) => {
+      console.error('[capacitor-pjsip] inviter.invite failed', err);
+      this.sessions.delete(callId);
+      this.notifyCallState(callId, 'disconnected', options.uri);
+    });
 
     return { callId };
   }
