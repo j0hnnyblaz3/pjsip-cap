@@ -1,15 +1,39 @@
 package com.redyrect.pjsip
 
+import android.Manifest
 import com.getcapacitor.JSArray
 import com.getcapacitor.JSObject
+import com.getcapacitor.PermissionState
 import com.getcapacitor.Plugin
 import com.getcapacitor.PluginCall
 import com.getcapacitor.PluginMethod
 import com.getcapacitor.annotation.CapacitorPlugin
+import com.getcapacitor.annotation.Permission
+import com.getcapacitor.annotation.PermissionCallback
 import com.google.firebase.messaging.FirebaseMessaging
 
-@CapacitorPlugin(name = "Pjsip")
+@CapacitorPlugin(
+    name = "Pjsip",
+    permissions = [
+        // Android won't auto-prompt for RECORD_AUDIO when JNI opens the
+        // mic — the request has to originate from a normal Activity
+        // call, which Capacitor's permission plumbing provides for us
+        // via requestPermissionForAlias() below.
+        Permission(
+            strings = [Manifest.permission.RECORD_AUDIO],
+            alias = "microphone",
+        ),
+    ],
+)
 class PjsipPlugin : Plugin() {
+
+    companion object {
+        // Must match the `alias` in @Permission above. Kept here rather
+        // than reused from the annotation because annotation arguments
+        // can't reference companion-object consts without a forward-
+        // reference compile error.
+        private const val MIC_PERMISSION = "microphone"
+    }
 
     private lateinit var sipManager: SipManager
 
@@ -105,6 +129,26 @@ class PjsipPlugin : Plugin() {
 
     @PluginMethod
     fun makeCall(call: PluginCall) {
+        if (getPermissionState(MIC_PERMISSION) != PermissionState.GRANTED) {
+            // Hand the same PluginCall to Capacitor's permission flow;
+            // when the user grants/denies, makeCallAfterMicPermission()
+            // runs with the original arguments still intact.
+            requestPermissionForAlias(MIC_PERMISSION, call, "makeCallAfterMicPermission")
+            return
+        }
+        performMakeCall(call)
+    }
+
+    @PermissionCallback
+    private fun makeCallAfterMicPermission(call: PluginCall) {
+        if (getPermissionState(MIC_PERMISSION) == PermissionState.GRANTED) {
+            performMakeCall(call)
+        } else {
+            call.reject("Microphone permission is required to place calls")
+        }
+    }
+
+    private fun performMakeCall(call: PluginCall) {
         val uri = call.getString("uri") ?: return call.reject("Missing uri")
 
         val callId = sipManager.makeCall(uri)
@@ -118,6 +162,23 @@ class PjsipPlugin : Plugin() {
 
     @PluginMethod
     fun answerCall(call: PluginCall) {
+        if (getPermissionState(MIC_PERMISSION) != PermissionState.GRANTED) {
+            requestPermissionForAlias(MIC_PERMISSION, call, "answerCallAfterMicPermission")
+            return
+        }
+        performAnswerCall(call)
+    }
+
+    @PermissionCallback
+    private fun answerCallAfterMicPermission(call: PluginCall) {
+        if (getPermissionState(MIC_PERMISSION) == PermissionState.GRANTED) {
+            performAnswerCall(call)
+        } else {
+            call.reject("Microphone permission is required to answer calls")
+        }
+    }
+
+    private fun performAnswerCall(call: PluginCall) {
         val callId = call.getString("callId") ?: return call.reject("Missing callId")
 
         sipManager.answerCall(callId) { error ->
