@@ -327,9 +327,17 @@ export class PjsipWeb extends WebPlugin implements PjsipPlugin {
     // goes out but the UI never shows, the only way to tell where the
     // chain broke is a breadcrumb at every link. Keep it as a one-line
     // info log so it's visible in production console without spamming.
+    // hasListeners + the registrationStateChanged listener count are
+    // included to detect two distinct failure modes: (a) nobody ever
+    // subscribed to incomingCall, vs (b) subscribers exist on a
+    // different plugin instance than the one we're dispatching on.
+    const hasIncoming = this.hasListeners('incomingCall');
+    const hasReg = this.hasListeners('registrationStateChanged');
+    const hasCallState = this.hasListeners('callStateChanged');
     console.info(
       `[capacitor-pjsip] incoming INVITE → callId=${callId} ` +
-        `from=${remoteUri} displayName=${callerName || '(none)'}`,
+        `from=${remoteUri} displayName=${callerName || '(none)'} ` +
+        `listeners[incomingCall=${hasIncoming},registrationStateChanged=${hasReg},callStateChanged=${hasCallState}]`,
     );
 
     this.notifyListeners('incomingCall', {
