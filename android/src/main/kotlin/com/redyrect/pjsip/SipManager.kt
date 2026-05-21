@@ -5,6 +5,7 @@ import android.media.AudioManager
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Looper
+import android.util.Log
 
 data class SipConfig(
     val server: String,
@@ -21,6 +22,10 @@ data class SipConfig(
  * All pjsua calls are dispatched to a dedicated HandlerThread.
  */
 class SipManager(private val context: Context) {
+
+    companion object {
+        private const val TAG = "PjsipSipManager"
+    }
 
     interface Listener {
         fun onRegistrationStateChanged(state: String, reason: String?)
@@ -277,6 +282,29 @@ class SipManager(private val context: Context) {
                 audioManager.isBluetoothScoOn = true
             }
         }
+    }
+
+    /** Push pre-INVITE hint. Called from PushService when an FCM VoIP
+     *  push announces an incoming call is imminent — i.e. a SIP INVITE
+     *  is about to land on the registered transport. PushService also
+     *  reports the call to ConnectionService independently, so the
+     *  system call UI rings without waiting on the SIP layer.
+     *
+     *  Phase 3 work fills this in: re-acquire the network, ensure the
+     *  account is registered, and (optionally) optimistically register
+     *  the inbound call against ConnectionService's existing connection
+     *  so the eventual PJSIP `onIncomingCall` from JNI maps cleanly. For
+     *  the Phase 1 outbound-only smoke test this is never reached at
+     *  runtime; PushService.onMessageReceived only runs when a real
+     *  push arrives, which requires google-services.json + PBX-side
+     *  push delivery to both be live. The stub exists so the plugin
+     *  compiles and the Phase 3 contract is documented in code. */
+    fun handleIncomingCall(remoteUri: String, callerName: String?) {
+        Log.i(
+            TAG,
+            "handleIncomingCall (push pre-INVITE): $remoteUri ($callerName) — " +
+                "stub; Phase 3 wires this to wake the SIP stack",
+        )
     }
 
     // Helpers
