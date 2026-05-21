@@ -4,9 +4,9 @@ import {
   Registerer,
   RegistererState,
   Inviter,
+  Invitation,
   SessionState,
   type Session,
-  type Invitation,
 } from 'sip.js';
 
 import type {
@@ -172,7 +172,7 @@ export class PjsipWeb extends WebPlugin implements PjsipPlugin {
       // Terminated sessions are pruned in setupSessionListeners, but
       // guard anyway so a recovering client never re-adopts a dead call.
       if (session.state === SessionState.Terminated) continue;
-      const state = this.mapSessionState(session.state) ?? 'connecting';
+      const state = this.mapSessionState(session.state, session) ?? 'connecting';
       let remoteUri: string | undefined;
       let callerName: string | undefined;
       try {
@@ -349,7 +349,7 @@ export class PjsipWeb extends WebPlugin implements PjsipPlugin {
 
   private setupSessionListeners(callId: string, session: Session): void {
     session.stateChange.addListener((state: SessionState) => {
-      const mapped = this.mapSessionState(state);
+      const mapped = this.mapSessionState(state, session);
       if (mapped) {
         this.notifyCallState(callId, mapped);
       }
@@ -426,10 +426,23 @@ export class PjsipWeb extends WebPlugin implements PjsipPlugin {
     pc.addEventListener('connectionstatechange', handler);
   }
 
-  private mapSessionState(state: SessionState): CallState | null {
+  /**
+   * Map sip.js's symmetric Session lifecycle to our app's direction-aware
+   * CallState. `SessionState.Initial` means very different things for the
+   * two kinds of session and there is NO way to know which from the enum
+   * alone — Inviter starts in Initial before sending INVITE (we're
+   * dialing) while Invitation starts in Initial after receiving INVITE
+   * (we're being rung). Pass the session so we can disambiguate; without
+   * it, the safe default mirrors the outbound semantics so a context-less
+   * lookup never silently reports an Initial session as ringing.
+   */
+  private mapSessionState(
+    state: SessionState,
+    session?: Session,
+  ): CallState | null {
     switch (state) {
       case SessionState.Initial:
-        return 'calling';
+        return session instanceof Invitation ? 'incoming' : 'calling';
       case SessionState.Establishing:
         return 'connecting';
       case SessionState.Established:
