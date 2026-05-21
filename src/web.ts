@@ -341,12 +341,72 @@ export class PjsipWeb extends WebPlugin implements PjsipPlugin {
       }
     });
 
-    // Auto-attach remote audio when established
+    // Auto-attach remote audio when established, and start watching the
+    // peer connection — see watchPeerConnectionHealth.
     session.stateChange.addListener((state: SessionState) => {
       if (state === SessionState.Established) {
         this.attachRemoteAudio(session);
+        this.watchPeerConnectionHealth(callId, session);
       }
     });
+
+    // Dedicated "remote ended the call" signal. sip.js calls these
+    // delegate methods synchronously on receipt of the BYE/CANCEL,
+    // BEFORE the state-machine transition that drives the stateChange
+    // listener above. Having an independent code path means a remote
+    // hangup is surfaced even when stateChange→Terminated would
+    // otherwise be missed by our subscribers.
+    //
+    // See sip.js api/session-delegate.d.ts — onBye for established
+    // sessions, onCancel for INVITE-phase aborts.
+    session.delegate = {
+      onBye: () => {
+        this.notifyCallState(callId, 'disconnected');
+      },
+      onCancel: () => {
+        this.notifyCallState(callId, 'disconnected');
+      },
+    };
+  }
+
+  /** Detect the *other* remote-hangup failure mode: the BYE never
+   *  reaches sip.js at all (WSS transport drop, intermediate proxy
+   *  swallowed it, etc.) so neither stateChange nor delegate.onBye
+   *  fires. We watch the WebRTC peer connection directly — ICE consent
+   *  freshness fails ~30s after the remote stops sending, transitioning
+   *  `pc.connectionState` to 'disconnected' → 'failed'. That's an
+   *  authoritative "the other side is gone" signal independent of
+   *  SIP-layer events.
+   *
+   *  Bound at Established (when the peer connection exists) and
+   *  removed when state transitions away or the call ends. */
+  private watchPeerConnectionHealth(callId: string, session: Session): void {
+    let pc: RTCPeerConnection;
+    try {
+      pc = this.getPeerConnection(session);
+    } catch {
+      return;
+    }
+    const handler = () => {
+      const s = pc.connectionState;
+      if (s === 'failed' || s === 'disconnected' || s === 'closed') {
+        console.warn(
+          `[capacitor-pjsip] peer connection ${s} on ${callId} — ` +
+            `treating as remote hangup`,
+        );
+        pc.removeEventListener('connectionstatechange', handler);
+        this.notifyCallState(callId, 'disconnected');
+        this.sessions.delete(callId);
+        // Try to send BYE on our end so the PBX cleans up its leg too —
+        // best-effort, session may already be torn down.
+        try {
+          void session.bye();
+        } catch {
+          /* already gone */
+        }
+      }
+    };
+    pc.addEventListener('connectionstatechange', handler);
   }
 
   private mapSessionState(state: SessionState): CallState | null {
