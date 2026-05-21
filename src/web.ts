@@ -323,6 +323,15 @@ export class PjsipWeb extends WebPlugin implements PjsipPlugin {
     const remoteUri = invitation.remoteIdentity.uri.toString();
     const callerName = invitation.remoteIdentity.displayName;
 
+    // Inbound is the lowest-visibility code path — when 180 Ringing
+    // goes out but the UI never shows, the only way to tell where the
+    // chain broke is a breadcrumb at every link. Keep it as a one-line
+    // info log so it's visible in production console without spamming.
+    console.info(
+      `[capacitor-pjsip] incoming INVITE → callId=${callId} ` +
+        `from=${remoteUri} displayName=${callerName || '(none)'}`,
+    );
+
     this.notifyListeners('incomingCall', {
       callId,
       remoteUri,
