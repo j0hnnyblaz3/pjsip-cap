@@ -344,21 +344,14 @@ export class PjsipWeb extends WebPlugin implements PjsipPlugin {
       /* header absent or unreadable — fine */
     }
 
-    // Inbound is the lowest-visibility code path — when 180 Ringing
-    // goes out but the UI never shows, the only way to tell where the
-    // chain broke is a breadcrumb at every link. Keep it as a one-line
-    // info log so it's visible in production console without spamming.
-    // hasListeners + the registrationStateChanged listener count are
-    // included to detect two distinct failure modes: (a) nobody ever
-    // subscribed to incomingCall, vs (b) subscribers exist on a
-    // different plugin instance than the one we're dispatching on.
-    const hasIncoming = this.hasListeners('incomingCall');
-    const hasReg = this.hasListeners('registrationStateChanged');
-    const hasCallState = this.hasListeners('callStateChanged');
+    // One-line breadcrumb so any future inbound-routing debug has a
+    // visible anchor on the wire side. Trimmed down from the diagnostic
+    // listener-state dump used during initial bring-up — that helped
+    // find the Capacitor singleton-race; not noise we need on every call.
     console.info(
       `[capacitor-pjsip] incoming INVITE → callId=${callId} ` +
-        `from=${remoteUri} displayName=${callerName || '(none)'} ` +
-        `listeners[incomingCall=${hasIncoming},registrationStateChanged=${hasReg},callStateChanged=${hasCallState}]`,
+        `callUuid=${callUuid ?? '(none)'} from=${remoteUri} ` +
+        `displayName=${callerName || '(none)'}`,
     );
 
     this.notifyListeners('incomingCall', {
