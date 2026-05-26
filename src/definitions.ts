@@ -54,6 +54,12 @@ export interface IncomingCallEvent {
   callId: string;
   remoteUri: string;
   callerName?: string;
+  /** The PBX-side call identifier, lifted from the INVITE's
+   *  `X-Redyrect-Call-UUID` header when present. Lets the client
+   *  address this specific call via REST (decline/hangup) and correlate
+   *  with the FCM push that announced it. Optional — older PBX versions
+   *  don't emit the header. */
+  callUuid?: string;
 }
 
 export interface PushTokenEvent {

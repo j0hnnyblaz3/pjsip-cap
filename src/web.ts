@@ -18,6 +18,16 @@ import type {
   ActiveCall,
 } from './definitions';
 
+/**
+ * SIP header the Redyrect PBX adds to inbound INVITEs carrying its own
+ * `call_uuid` (matches the FCM push payload + the CDR `uuid`). The header
+ * name is also published via `/public-config -> features.call_uuid_header`
+ * for discoverability; we hardcode the canonical value here because the
+ * plugin runs in any client and shouldn't depend on a config round-trip
+ * before the first incoming INVITE.
+ */
+const CALL_UUID_HEADER = 'X-Redyrect-Call-UUID';
+
 export class PjsipWeb extends WebPlugin implements PjsipPlugin {
   private ua: UserAgent | null = null;
   private registerer: Registerer | null = null;
@@ -322,6 +332,17 @@ export class PjsipWeb extends WebPlugin implements PjsipPlugin {
 
     const remoteUri = invitation.remoteIdentity.uri.toString();
     const callerName = invitation.remoteIdentity.displayName;
+    // PBX-side correlation header. Optional — only present when the PBX
+    // emits it. Wrap defensively because sip.js's request shape can vary
+    // between versions and a thrown error here would lose the whole
+    // incomingCall event.
+    let callUuid: string | undefined;
+    try {
+      const raw = invitation.request.getHeader(CALL_UUID_HEADER);
+      if (raw) callUuid = raw.trim() || undefined;
+    } catch {
+      /* header absent or unreadable — fine */
+    }
 
     // Inbound is the lowest-visibility code path — when 180 Ringing
     // goes out but the UI never shows, the only way to tell where the
@@ -344,6 +365,7 @@ export class PjsipWeb extends WebPlugin implements PjsipPlugin {
       callId,
       remoteUri,
       callerName: callerName || undefined,
+      callUuid,
     });
   }
 
