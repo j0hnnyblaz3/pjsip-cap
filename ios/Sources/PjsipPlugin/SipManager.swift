@@ -98,6 +98,14 @@ class SipManager: NSObject {
     /// The pjsua account id after successful registration
     private var accountId: pjsua_acc_id = -1
 
+    /// The pjsua transport id from `createTransport()`, threaded into
+    /// every account's `accCfg.transport_id` so PJSIP knows which
+    /// transport to use for Contact + outbound. Without this PJSIP
+    /// defaults to looking up UDP transport, fails with
+    /// PJSIP_EUNSUPTRANSPORT when the only transport is TLS, and the
+    /// registration never even gets sent.
+    private var transportId: pjsua_transport_id = -1
+
     /// Whether pjsua_create + pjsua_init + pjsua_start have been called
     private var pjsuaStarted = false
 
@@ -160,6 +168,7 @@ class SipManager: NSObject {
                 // pjsua_destroy tears down the transport table too;
                 // a future register() will need to re-create.
                 self.transportCreated = false
+                self.transportId = -1
             }
 
             DispatchQueue.main.async {
@@ -232,11 +241,12 @@ class SipManager: NSObject {
         var transportCfg = pjsua_transport_config()
         pjsua_transport_config_default(&transportCfg)
 
-        var transportId: pjsua_transport_id = -1
-        let status = pjsua_transport_create(transportType, &transportCfg, &transportId)
+        var newTransportId: pjsua_transport_id = -1
+        let status = pjsua_transport_create(transportType, &transportCfg, &newTransportId)
         guard status == Int32(PJ_SUCCESS.rawValue) else {
             throw sipError("pjsua_transport_create failed", status: status)
         }
+        self.transportId = newTransportId
         transportCreated = true
     }
 
@@ -272,11 +282,32 @@ class SipManager: NSObject {
         var accCfg = pjsua_acc_config()
         pjsua_acc_config_default(&accCfg)
 
+        // Encode the transport hint into the reg_uri AND set
+        // accCfg.transport_id. Either alone is enough in theory, but
+        // PJSIP's URI parser and transport selector check different
+        // signals at different stages — both prevent
+        // PJSIP_EUNSUPTRANSPORT errors when the only listener is
+        // non-UDP. (sip+;transport=tls and sips:// are functionally
+        // equivalent here; we use the former because the SIP From
+        // domain stays sip: scheme.)
+        let transportParam: String
+        switch config.transport.lowercased() {
+        case "tls", "wss":
+            transportParam = ";transport=tls"
+        case "tcp":
+            transportParam = ";transport=tcp"
+        default:
+            transportParam = ""
+        }
         let sipUri = "sip:\(config.username)@\(config.domain)"
-        let regUri = "sip:\(config.server):\(config.port)"
+        let regUri = "sip:\(config.server):\(config.port)\(transportParam)"
 
         accCfg.id = pj_str_from_swift(sipUri)
         accCfg.reg_uri = pj_str_from_swift(regUri)
+        // Bind this account to the transport we created. If unset
+        // (-1), PJSIP defaults to UDP for outbound — which silently
+        // fails when only a TLS transport exists.
+        accCfg.transport_id = self.transportId
 
         accCfg.cred_count = 1
         accCfg.cred_info.0.realm = pj_str_from_swift("*")
