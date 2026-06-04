@@ -101,6 +101,12 @@ class SipManager: NSObject {
     /// Whether pjsua_create + pjsua_init + pjsua_start have been called
     private var pjsuaStarted = false
 
+    /// Tracks whether we've already created a SIP transport for the
+    /// current pjsua lifecycle. pjsua's transport array is bounded,
+    /// so we must not re-create one on every register() retry.
+    /// Reset alongside pjsuaStarted in unregister().
+    private var transportCreated = false
+
     /// Dedicated thread for all PJSIP calls
     private let pjThread = PjsipThread()
 
@@ -151,6 +157,9 @@ class SipManager: NSObject {
             if self.pjsuaStarted {
                 pjsua_destroy()
                 self.pjsuaStarted = false
+                // pjsua_destroy tears down the transport table too;
+                // a future register() will need to re-create.
+                self.transportCreated = false
             }
 
             DispatchQueue.main.async {
@@ -199,6 +208,14 @@ class SipManager: NSObject {
     }
 
     private func createTransport(config: SipConfig) throws {
+        // pjsua's transport table is fixed-size — adding a fresh
+        // transport on every register() retry exhausts it. Once we've
+        // created one for this pjsua lifecycle, reuse it. A config
+        // change that needs a different transport type would happen
+        // through unregister() → register() (which resets pjsuaStarted
+        // and transportCreated together).
+        guard !transportCreated else { return }
+
         var transportType: pjsip_transport_type_e
 
         switch config.transport.lowercased() {
@@ -220,6 +237,7 @@ class SipManager: NSObject {
         guard status == Int32(PJ_SUCCESS.rawValue) else {
             throw sipError("pjsua_transport_create failed", status: status)
         }
+        transportCreated = true
     }
 
     private func startPjsua() throws {
@@ -234,6 +252,23 @@ class SipManager: NSObject {
     }
 
     private func addAccount(config: SipConfig) throws {
+        // If a previous register() left an account in place, delete
+        // it before adding a fresh one. Otherwise every retry would
+        // pjsua_acc_add a NEW account — pjsua_var.acc[] is bounded
+        // (default PJSUA_MAX_ACC = 8), and the assertion at
+        // pjsua_acc.c:464 (acc_cnt < acc[] size) crashes the app
+        // after ~8 retries.
+        //
+        // Note: we delete + re-add (rather than pjsua_acc_modify) to
+        // keep the path simple regardless of what changed in config —
+        // server, credentials, transport. The downside is a brief
+        // unregistered window mid-retry, which is fine because the
+        // caller is already in a retry loop expecting failure.
+        if self.accountId != -1 {
+            pjsua_acc_del(self.accountId)
+            self.accountId = -1
+        }
+
         var accCfg = pjsua_acc_config()
         pjsua_acc_config_default(&accCfg)
 
