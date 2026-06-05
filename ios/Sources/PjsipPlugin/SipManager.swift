@@ -10,6 +10,14 @@ struct SipConfig {
     let domain: String
     let transport: String
     let proxy: String?       // outbound proxy / SBC URI
+    /// SRTP policy. "disabled" (default), "optional", or "mandatory".
+    /// PJSIP defaults to DISABLED which means we don't offer SRTP in
+    /// SDP — fine for legacy unencrypted PBXes, but a SBC that
+    /// requires SRTP (as most modern deployments do, especially when
+    /// also serving WebRTC clients) rejects the offer and the call
+    /// has no media. "optional" is the safest default: offer SRTP,
+    /// accept either; the peer chooses.
+    let srtp: String?
 }
 
 protocol SipManagerDelegate: AnyObject {
@@ -454,6 +462,29 @@ class SipManager: NSObject {
             accCfg.proxy_cnt = 1
             accCfg.proxy.0 = pj_str_from_swift(proxy)
         }
+
+        // SRTP policy. Without this, PJSIP defaults to
+        // PJSUA_SRTP_DISABLED — we offer plain RTP only and the SBC
+        // (which sits in front of the PBX and is also serving WebRTC
+        // clients that require encryption) rejects the media offer or
+        // routes audio nowhere. "optional" is the safe modern default:
+        // offer SRTP, accept either at the peer's choice.
+        // `use_srtp` is typed `pjmedia_srtp_use` (PJMEDIA_SRTP_*),
+        // NOT `pjsua_srtp_*` — the SRTP enum lives in the pjmedia
+        // layer even though pjsua_acc_config exposes the field.
+        switch (config.srtp ?? "optional").lowercased() {
+        case "mandatory":
+            accCfg.use_srtp = PJMEDIA_SRTP_MANDATORY
+        case "disabled", "none", "off":
+            accCfg.use_srtp = PJMEDIA_SRTP_DISABLED
+        default:
+            accCfg.use_srtp = PJMEDIA_SRTP_OPTIONAL
+        }
+        // SRTP-over-TLS-only requirement. We're already on TLS so
+        // this is satisfied; setting it explicitly hardens against
+        // a future UDP fallback path accidentally negotiating SRTP
+        // over an unencrypted signaling channel.
+        accCfg.srtp_secure_signaling = 1
 
         accCfg.reg_retry_interval = 300
         accCfg.reg_first_retry_interval = 30

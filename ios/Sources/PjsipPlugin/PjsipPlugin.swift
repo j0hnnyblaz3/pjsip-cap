@@ -60,7 +60,15 @@ public class PjsipPlugin: CAPPlugin, CAPBridgedPlugin {
             password: password,
             domain: domain,
             transport: call.getString("transport") ?? "udp",
-            proxy: call.getString("proxy")
+            proxy: call.getString("proxy"),
+            // SRTP policy passes through from the JS layer's
+            // srtpPolicy field. Accept "disabled" | "optional" |
+            // "mandatory". Default optional — modern SBCs that
+            // also serve WebRTC clients (which mandate SRTP)
+            // typically reject plain RTP offers, and our previous
+            // default of disabled is what caused outbound calls
+            // to set up but never get media.
+            srtp: call.getString("srtpPolicy") ?? "optional"
         )
 
         sipManager.register(config: config) { error in
