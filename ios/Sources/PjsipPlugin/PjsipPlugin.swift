@@ -252,8 +252,16 @@ extension PjsipPlugin: PushManagerDelegate {
         notifyListeners("incomingCall", data: data)
     }
 
-    func pushManagerDidUpdatePushToken(token: String) {
-        notifyListeners("pushTokenUpdated", data: ["token": token, "platform": "apns"])
+    func pushManagerDidUpdatePushToken(token: String, environment: String) {
+        // environment is "sandbox" or "production" — the PBX uses this to
+        // pick the right APNs endpoint for THIS specific token, so a debug
+        // Xcode build and a TestFlight build of the same app can coexist
+        // against the same global config. See PushManager.currentApnsEnvironment.
+        notifyListeners("pushTokenUpdated", data: [
+            "token": token,
+            "platform": "apns",
+            "environment": environment,
+        ])
     }
 }
 

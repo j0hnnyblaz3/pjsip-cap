@@ -3,7 +3,21 @@ import PushKit
 
 protocol PushManagerDelegate: AnyObject {
     func pushManagerDidReceiveVoIPPush(payload: [AnyHashable: Any])
-    func pushManagerDidUpdatePushToken(token: String)
+    func pushManagerDidUpdatePushToken(token: String, environment: String)
+}
+
+/// The APNs environment this build will receive pushes from. Debug-signed
+/// builds from Xcode use the sandbox gateway; release builds (Ad-hoc,
+/// TestFlight, App Store) use the production gateway. Apple gives no
+/// runtime API for this — the conventional and reliable signal is the
+/// build configuration. PBX uses this to pick the right APNs endpoint
+/// per device instead of a global flag.
+private func currentApnsEnvironment() -> String {
+    #if DEBUG
+    return "sandbox"
+    #else
+    return "production"
+    #endif
 }
 
 /// Manages PushKit VoIP push notifications for incoming calls.
@@ -42,8 +56,9 @@ extension PushManager: PKPushRegistryDelegate {
         guard type == .voIP else { return }
 
         let token = pushCredentials.token.map { String(format: "%02x", $0) }.joined()
-        print("[PushManager] VoIP push token: \(token)")
-        delegate?.pushManagerDidUpdatePushToken(token: token)
+        let env = currentApnsEnvironment()
+        print("[PushManager] VoIP push token: \(token) (env: \(env))")
+        delegate?.pushManagerDidUpdatePushToken(token: token, environment: env)
     }
 
     func pushRegistry(_ registry: PKPushRegistry, didReceiveIncomingPushWith payload: PKPushPayload, for type: PKPushType, completion: @escaping () -> Void) {
