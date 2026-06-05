@@ -139,6 +139,18 @@ class SipManager: NSObject {
     /// waiting on another CallKit roundtrip.
     private var pendingAnswerCallUuids: Set<String> = []
 
+    /// Timeout workers keyed by callUuid. Each push that lands arms
+    /// one of these; if the matching INVITE arrives within the grace
+    /// window, the worker is cancelled. If it doesn't, the worker
+    /// fires and we synthesize a 'disconnected' to clean up the
+    /// stuck CallKit entry (CallKit's audio-session failure doesn't
+    /// end the call on its own — leaves the iPhone in a "still in
+    /// call" state forever otherwise).
+    private var pendingCallWorkItems: [String: DispatchWorkItem] = [:]
+    /// Apple's PushKit grace window is ~30s — match it so we don't
+    /// terminate just as the INVITE is about to land late.
+    private static let PUSH_TO_INVITE_GRACE_SEC: TimeInterval = 30.0
+
     /// Dedicated thread for all PJSIP calls
     private let pjThread = PjsipThread()
 
@@ -210,10 +222,68 @@ class SipManager: NSObject {
     /// When the matching INVITE lands, handleIncomingCall will reuse
     /// this UUID as the plugin callId so CallKit's call UUID is the
     /// same identifier across push → INVITE → answer.
+    ///
+    /// Arms a grace timer matching iOS's PushKit window — if no INVITE
+    /// arrives in PUSH_TO_INVITE_GRACE_SEC the worker fires a
+    /// synthesized 'disconnected' so PjsipPlugin's delegate handler
+    /// calls callKitManager.reportCallEnded and the iPhone clears its
+    /// "in call" state. Without this, a push whose INVITE is lost (PBX
+    /// bridge sends to a different contact, network drop, etc.) leaves
+    /// CallKit stuck and the user has to force-quit the app.
     func expectIncomingCall(callUuid: String) {
         pjThread.performAsync { [weak self] in
-            self?.pendingCallUuids.insert(callUuid)
+            guard let self = self else { return }
+            self.pendingCallUuids.insert(callUuid)
             print("[SipManager] expectIncomingCall: now tracking \(callUuid)")
+
+            // Re-arm semantics: if a prior push for the same UUID is
+            // still in flight, cancel its worker first.
+            self.pendingCallWorkItems[callUuid]?.cancel()
+
+            let work = DispatchWorkItem { [weak self] in
+                self?.pjThread.performAsync {
+                    self?.expireCallUuid(callUuid)
+                }
+            }
+            self.pendingCallWorkItems[callUuid] = work
+            DispatchQueue.global().asyncAfter(
+                deadline: .now() + Self.PUSH_TO_INVITE_GRACE_SEC,
+                execute: work
+            )
+        }
+    }
+
+    /// Called from the grace timer. Cleans up the pending state and
+    /// fires a synthesized 'disconnected' delegate event so the rest
+    /// of the system (CallKit, the JS layer's call list) all observe
+    /// the same terminal state. No-op if the INVITE arrived and the
+    /// UUID is no longer pending.
+    private func expireCallUuid(_ callUuid: String) {
+        guard pendingCallUuids.contains(callUuid) else { return }
+
+        print("[SipManager] push UUID \(callUuid) expired — no INVITE in " +
+              "\(Self.PUSH_TO_INVITE_GRACE_SEC)s; cleaning up CallKit entry")
+        pendingCallUuids.remove(callUuid)
+        pendingAnswerCallUuids.remove(callUuid)
+        pendingCallWorkItems.removeValue(forKey: callUuid)
+
+        // delegate fans out on main — PjsipPlugin.onCallStateChanged
+        // routes 'disconnected' → CallKitManager.reportCallEnded.
+        DispatchQueue.main.async { [weak self] in
+            self?.delegate?.onCallStateChanged(
+                callId: callUuid,
+                state: "disconnected",
+                remoteUri: nil
+            )
+        }
+    }
+
+    /// Cancel the grace timer for a UUID. Called from handleIncomingCall
+    /// once the real INVITE has bridged to a real pjsua call, and from
+    /// hangup/unregister teardown paths.
+    private func cancelPendingTimer(callUuid: String) {
+        if let work = pendingCallWorkItems.removeValue(forKey: callUuid) {
+            work.cancel()
         }
     }
 
@@ -237,6 +307,16 @@ class SipManager: NSObject {
                 pjsua_destroy()
                 self.pjsuaStarted = false
             }
+
+            // Cancel any in-flight push grace timers — we're tearing
+            // the SIP stack down, no point waiting for INVITEs that
+            // would land on a destroyed pjsua.
+            for (_, work) in self.pendingCallWorkItems {
+                work.cancel()
+            }
+            self.pendingCallWorkItems.removeAll()
+            self.pendingCallUuids.removeAll()
+            self.pendingAnswerCallUuids.removeAll()
 
             DispatchQueue.main.async {
                 self.registrationState = "unregistered"
@@ -466,14 +546,32 @@ class SipManager: NSObject {
     }
 
     func hangupCall(callId: String) {
-        guard let pjCallId = reverseCallMap[callId] else { return }
-
-        pjThread.performAsync { [self] in
-            pjsua_call_hangup(pjCallId, 0, nil, nil)
+        // Fast path — there's a real pjsua call, tear it down.
+        if let pjCallId = reverseCallMap[callId] {
+            pjThread.performAsync { [self] in
+                pjsua_call_hangup(pjCallId, 0, nil, nil)
+            }
+            callMap.removeValue(forKey: pjCallId)
+            reverseCallMap.removeValue(forKey: callId)
+            delegate?.onCallStateChanged(callId: callId, state: "disconnected", remoteUri: nil)
+            return
         }
-        callMap.removeValue(forKey: pjCallId)
-        reverseCallMap.removeValue(forKey: callId)
-        delegate?.onCallStateChanged(callId: callId, state: "disconnected", remoteUri: nil)
+
+        // Slow path — caller hangs up on a push-only placeholder
+        // (CallKit reported, INVITE never arrived). Cancel the grace
+        // timer and clear the pending sets so the next push for this
+        // UUID isn't stale, then synthesize a disconnect so the
+        // delegate chain (→ CallKitManager.reportCallEnded) tears
+        // down the iOS UI.
+        if pendingCallUuids.contains(callId) {
+            pjThread.performAsync { [weak self] in
+                guard let self = self else { return }
+                self.pendingCallUuids.remove(callId)
+                self.pendingAnswerCallUuids.remove(callId)
+                self.cancelPendingTimer(callUuid: callId)
+            }
+            delegate?.onCallStateChanged(callId: callId, state: "disconnected", remoteUri: nil)
+        }
     }
 
     // MARK: - In-call controls
@@ -581,6 +679,9 @@ class SipManager: NSObject {
         if let uuid = headerUuid {
             pluginCallId = uuid
             pendingCallUuids.remove(uuid)
+            // INVITE bridged — kill the grace timer so it doesn't
+            // synthesize a disconnect on top of the real call.
+            cancelPendingTimer(callUuid: uuid)
         } else {
             callIdCounter += 1
             pluginCallId = "ios-call-\(callIdCounter)"
