@@ -101,6 +101,26 @@ class SipManager: NSObject {
     /// Whether pjsua_create + pjsua_init + pjsua_start have been called
     private var pjsuaStarted = false
 
+    // MARK: - Push correlation state
+    //
+    // When a VoIP push arrives, iOS requires we report a call to CallKit
+    // synchronously. The push payload carries `call_uuid` — the same
+    // value the PBX stamps on the eventual INVITE as the
+    // X-Redyrect-Call-UUID header. We track those pending UUIDs here so
+    // that when the INVITE lands, handleIncomingCall can match its
+    // header value against pendingCallUuids and use the SAME identifier
+    // for the plugin callId — keeping CallKit, the pjsua call, and the
+    // JS layer all on one stable id from push → INVITE → answer.
+
+    /// Call UUIDs from VoIP pushes whose SIP INVITE hasn't arrived yet. */
+    private var pendingCallUuids: Set<String> = []
+
+    /// Call UUIDs the user tapped Answer on before the INVITE arrived.
+    /// When the matching INVITE lands, we fire pjsua_call_answer(200)
+    /// immediately so the user-initiated answer doesn't get stuck
+    /// waiting on another CallKit roundtrip.
+    private var pendingAnswerCallUuids: Set<String> = []
+
     /// Dedicated thread for all PJSIP calls
     private let pjThread = PjsipThread()
 
@@ -136,6 +156,46 @@ class SipManager: NSObject {
             DispatchQueue.main.async {
                 completion(nil)
             }
+        }
+    }
+
+    /// Force an immediate re-REGISTER on the existing account. Called
+    /// from the VoIP push handler — iOS tears the TLS socket when the
+    /// app is suspended, so even though PJSIP's internal state thinks
+    /// it's registered, FreeSWITCH no longer has a working contact to
+    /// send the INVITE to. A fresh REGISTER re-establishes the TLS
+    /// transport and refreshes the Contact URI server-side, so the
+    /// INVITE the PBX is about to send actually reaches us.
+    ///
+    /// No-op if the account hasn't been created yet (cold start case
+    /// where SIP isn't configured) — there's nothing to refresh.
+    func forceRegister() {
+        pjThread.performAsync { [weak self] in
+            guard let self = self, self.accountId != -1 else {
+                print("[SipManager] forceRegister: no account — skipping")
+                return
+            }
+            let status = pjsua_acc_set_registration(
+                self.accountId,
+                pj_bool_t(PJ_TRUE.rawValue)
+            )
+            if status == Int32(PJ_SUCCESS.rawValue) {
+                print("[SipManager] forceRegister: REGISTER triggered")
+            } else {
+                print("[SipManager] forceRegister failed status=\(status)")
+            }
+        }
+    }
+
+    /// Tell the manager to expect an inbound SIP INVITE carrying
+    /// X-Redyrect-Call-UUID: <callUuid>. Called from the push handler.
+    /// When the matching INVITE lands, handleIncomingCall will reuse
+    /// this UUID as the plugin callId so CallKit's call UUID is the
+    /// same identifier across push → INVITE → answer.
+    func expectIncomingCall(callUuid: String) {
+        pjThread.performAsync { [weak self] in
+            self?.pendingCallUuids.insert(callUuid)
+            print("[SipManager] expectIncomingCall: now tracking \(callUuid)")
         }
     }
 
@@ -300,19 +360,41 @@ class SipManager: NSObject {
     }
 
     func answerCall(callId: String, completion: ((Error?) -> Void)?) {
-        guard let pjCallId = reverseCallMap[callId] else {
-            completion?(NSError(domain: "PjsipPlugin", code: -1, userInfo: [NSLocalizedDescriptionKey: "Call not found"]))
+        // Fast path — pjsua call is already there, answer immediately.
+        if let pjCallId = reverseCallMap[callId] {
+            pjThread.performAsync { [self] in
+                let status = pjsua_call_answer(pjCallId, 200, nil, nil)
+                if status == Int32(PJ_SUCCESS.rawValue) {
+                    DispatchQueue.main.async { completion?(nil) }
+                } else {
+                    DispatchQueue.main.async {
+                        completion?(self.sipError("pjsua_call_answer failed", status: status))
+                    }
+                }
+            }
             return
         }
 
-        pjThread.performAsync { [self] in
-            let status = pjsua_call_answer(pjCallId, 200, nil, nil)
-            if status == Int32(PJ_SUCCESS.rawValue) {
-                DispatchQueue.main.async { completion?(nil) }
-            } else {
-                DispatchQueue.main.async { completion?(self.sipError("pjsua_call_answer failed", status: status)) }
+        // Slow path — push arrived but the SIP INVITE hasn't landed
+        // yet. This is the common case when the user taps Accept in
+        // CallKit the moment they see the ring; the INVITE is still
+        // in flight over TLS. Stash the callId so handleIncomingCall
+        // can auto-answer the matching pjsua call as soon as it shows
+        // up, instead of failing with "Call not found".
+        if pendingCallUuids.contains(callId) {
+            pjThread.performAsync { [weak self] in
+                self?.pendingAnswerCallUuids.insert(callId)
+                print("[SipManager] answerCall: \(callId) pending — will auto-answer on INVITE")
             }
+            completion?(nil)
+            return
         }
+
+        completion?(NSError(
+            domain: "PjsipPlugin",
+            code: -1,
+            userInfo: [NSLocalizedDescriptionKey: "Call not found"]
+        ))
     }
 
     func hangupCall(callId: String) {
@@ -419,8 +501,22 @@ class SipManager: NSObject {
     }
 
     func handleIncomingCall(accountId: pjsua_acc_id, pjCallId: pjsua_call_id, rdata: UnsafeMutablePointer<pjsip_rx_data>?) {
-        callIdCounter += 1
-        let pluginCallId = "ios-call-\(callIdCounter)"
+        // Try to read X-Redyrect-Call-UUID from the INVITE. The PBX
+        // stamps this with FreeSWITCH's channel UUID — the same value
+        // that landed in the VoIP push payload's `call_uuid` field.
+        // If we have a matching pending push, we bind to its UUID so
+        // CallKit, pjsua, and the JS layer all share one identifier
+        // from push → INVITE → answer. Otherwise we fall back to the
+        // synthetic ios-call-N (foreground inbound case, no push).
+        let headerUuid = parseRedyrectCallUuid(rdata: rdata)
+        let pluginCallId: String
+        if let uuid = headerUuid {
+            pluginCallId = uuid
+            pendingCallUuids.remove(uuid)
+        } else {
+            callIdCounter += 1
+            pluginCallId = "ios-call-\(callIdCounter)"
+        }
 
         callMap[pjCallId] = pluginCallId
         reverseCallMap[pluginCallId] = pjCallId
@@ -437,9 +533,37 @@ class SipManager: NSObject {
         // Ring the call (180 Ringing)
         pjsua_call_answer(pjCallId, 180, nil, nil)
 
+        // If the user already tapped Accept on CallKit while the
+        // INVITE was in flight, fire the 200 OK now — no second
+        // round-trip through CallKit needed.
+        if pendingAnswerCallUuids.contains(pluginCallId) {
+            pendingAnswerCallUuids.remove(pluginCallId)
+            let status = pjsua_call_answer(pjCallId, 200, nil, nil)
+            print("[SipManager] auto-answered pending \(pluginCallId) status=\(status)")
+        }
+
         DispatchQueue.main.async { [weak self] in
             self?.delegate?.onIncomingCall(callId: pluginCallId, remoteUri: remoteUri, callerName: callerName)
         }
+    }
+
+    /// Read the X-Redyrect-Call-UUID header off an inbound SIP message.
+    /// Returns nil if the header isn't present (foreground inbound or
+    /// non-Redyrect upstream). Uses PJSIP's generic header lookup —
+    /// the cast from pjsip_hdr* to pjsip_generic_string_hdr* is safe
+    /// because custom string-valued headers register as generic.
+    private func parseRedyrectCallUuid(rdata: UnsafeMutablePointer<pjsip_rx_data>?) -> String? {
+        guard let rdata = rdata else { return nil }
+        let msg = rdata.pointee.msg_info.msg
+        guard let msg = msg else { return nil }
+        var headerName = pj_str_from_swift("X-Redyrect-Call-UUID")
+        guard let hdrPtr = pjsip_msg_find_hdr_by_name(msg, &headerName, nil) else {
+            return nil
+        }
+        let stringHdr = UnsafeRawPointer(hdrPtr)
+            .assumingMemoryBound(to: pjsip_generic_string_hdr.self)
+        let value = pjStringToSwift(stringHdr.pointee.hvalue)
+        return value.isEmpty ? nil : value
     }
 
     func handleCallStateChange(pjCallId: pjsua_call_id) {

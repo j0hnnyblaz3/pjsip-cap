@@ -237,19 +237,31 @@ extension PjsipPlugin: SipManagerDelegate {
 extension PjsipPlugin: PushManagerDelegate {
     func pushManagerDidReceiveVoIPPush(payload: [AnyHashable: Any]) {
         // CallKit was already reported synchronously by PushManager.
-        // CallKit was already reported synchronously by PushManager.
-        // The actual SIP INVITE will arrive via PJSIP's on_incoming_call callback
-        // which will trigger handleIncomingCall with proper pjsua call context.
-        // Just emit a JS event so the app knows a push arrived.
-        let callId = payload["callId"] as? String ?? "push-\(UUID().uuidString)"
-        let remoteUri = payload["remoteUri"] as? String ?? "unknown"
-        let callerName = payload["callerName"] as? String
-
-        var data: [String: Any] = ["callId": callId, "remoteUri": remoteUri]
-        if let callerName = callerName {
-            data["callerName"] = callerName
+        // The remaining work here is native-only — we deliberately do
+        // NOT fire a JS `incomingCall` event from the push, because:
+        //   - CallKit is the appropriate ringing surface on iOS, not
+        //     the in-app overlay. Firing a JS event would race with
+        //     CallKit and create a duplicate UI (and a stale Answer
+        //     button that calls pjsua.answer on a call that doesn't
+        //     exist yet).
+        //   - The JS layer learns about the call when the real SIP
+        //     INVITE arrives and handleIncomingCall fires its event
+        //     with the bridged callId.
+        //
+        // What we DO here:
+        //   1. Tell SipManager which call_uuid is incoming so when
+        //      the INVITE arrives carrying X-Redyrect-Call-UUID, the
+        //      pluginCallId binds to that pjsua call.
+        //   2. Force a fresh SIP REGISTER. iOS tore the TLS socket
+        //      when it suspended the app, so FreeSWITCH has a stale
+        //      contact — without this REGISTER, the INVITE the PBX
+        //      is about to send has nowhere to go and the caller is
+        //      bounced to voicemail.
+        let callUuid = payload["call_uuid"] as? String
+        if let uuid = callUuid {
+            sipManager.expectIncomingCall(callUuid: uuid)
         }
-        notifyListeners("incomingCall", data: data)
+        sipManager.forceRegister()
     }
 
     func pushManagerDidUpdatePushToken(token: String, environment: String) {

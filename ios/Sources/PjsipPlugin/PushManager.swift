@@ -69,11 +69,23 @@ extension PushManager: PKPushRegistryDelegate {
 
         let data = payload.dictionaryPayload
 
-        // Extract call info from push payload.
-        // Your push server must include these fields.
-        let callId = data["callId"] as? String ?? "push-\(UUID().uuidString)"
-        let remoteUri = data["remoteUri"] as? String ?? "unknown"
-        let callerName = data["callerName"] as? String
+        // Extract call info from the push payload. The PBX sends:
+        //   {
+        //     "call_uuid": "<freeswitch-channel-uuid>",
+        //     "callee_extension": "<dest>",
+        //     "caller_id_number": "<from-number>",
+        //     "caller_id_name": "<from-display>",
+        //     "server_time": "<rfc3339>"
+        //   }
+        // The call_uuid value also appears as the X-Redyrect-Call-UUID
+        // header on the eventual SIP INVITE, so we use it as the
+        // CallKit + plugin call id from the start — push, INVITE, and
+        // answer all share one identifier.
+        let callId = data["call_uuid"] as? String ?? "push-\(UUID().uuidString)"
+        let handle = (data["caller_id_number"] as? String)
+            ?? (data["callee_extension"] as? String)
+            ?? "unknown"
+        let callerName = data["caller_id_name"] as? String
 
         // STEP 1: Report to CallKit IMMEDIATELY — this MUST happen before completion()
         // This is the strict iOS 13+ requirement.
@@ -81,14 +93,16 @@ extension PushManager: PKPushRegistryDelegate {
             print("[PushManager] ERROR: CallKitManager not set — cannot report incoming call!")
             // Still must report something or iOS kills us. Report and immediately end.
             let fallbackKit = CallKitManager()
-            fallbackKit.reportIncomingCall(callId: callId, handle: remoteUri, callerName: callerName)
+            fallbackKit.reportIncomingCall(callId: callId, handle: handle, callerName: callerName)
             completion()
             return
         }
 
-        callKit.reportIncomingCall(callId: callId, handle: remoteUri, callerName: callerName)
+        callKit.reportIncomingCall(callId: callId, handle: handle, callerName: callerName)
 
-        // STEP 2: Notify delegate (plugin) so it can wake PJSIP and emit JS events
+        // STEP 2: Notify delegate (plugin) so it can wake PJSIP, fire
+        // an immediate REGISTER so FreeSWITCH has a live contact for
+        // the INVITE, and emit JS events.
         delegate?.pushManagerDidReceiveVoIPPush(payload: data)
 
         // STEP 3: Call completion — CallKit has already been notified
