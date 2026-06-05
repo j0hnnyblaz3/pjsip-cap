@@ -280,8 +280,17 @@ extension PjsipPlugin: PushManagerDelegate {
 // MARK: - CallKitManagerDelegate
 
 extension PjsipPlugin: CallKitManagerDelegate {
-    func callKitDidAnswerCall(callId: String) {
-        sipManager.answerCall(callId: callId, completion: nil)
+    func callKitDidAnswerCall(callId: String, completion: @escaping (Bool) -> Void) {
+        // Forward the CallKit answer completion through to SipManager.
+        // For a real pjsua call this resolves immediately; for a push-
+        // only placeholder waiting on the INVITE, SipManager holds the
+        // completion until the INVITE lands (then completion(true)) or
+        // the 5s budget expires (then completion(false), which lets
+        // CallKit fail the action cleanly instead of leaving a stuck
+        // entry).
+        sipManager.answerCall(callId: callId) { error in
+            completion(error == nil)
+        }
     }
 
     func callKitDidEndCall(callId: String) {

@@ -135,21 +135,27 @@ class SipManager: NSObject {
 
     /// Call UUIDs the user tapped Answer on before the INVITE arrived.
     /// When the matching INVITE lands, we fire pjsua_call_answer(200)
-    /// immediately so the user-initiated answer doesn't get stuck
-    /// waiting on another CallKit roundtrip.
+    /// immediately AND resolve the held CallKit answer completion.
     private var pendingAnswerCallUuids: Set<String> = []
 
-    /// Timeout workers keyed by callUuid. Each push that lands arms
-    /// one of these; if the matching INVITE arrives within the grace
-    /// window, the worker is cancelled. If it doesn't, the worker
-    /// fires and we synthesize a 'disconnected' to clean up the
-    /// stuck CallKit entry (CallKit's audio-session failure doesn't
-    /// end the call on its own — leaves the iPhone in a "still in
-    /// call" state forever otherwise).
-    private var pendingCallWorkItems: [String: DispatchWorkItem] = [:]
-    /// Apple's PushKit grace window is ~30s — match it so we don't
-    /// terminate just as the INVITE is about to land late.
-    private static let PUSH_TO_INVITE_GRACE_SEC: TimeInterval = 30.0
+    /// Pending CallKit answer completions keyed by callUuid. When the
+    /// user taps Accept before the SIP INVITE has arrived, we hold the
+    /// completion here instead of fulfilling/failing the CXAnswerCall-
+    /// Action right away. If the INVITE lands within ANSWER_WAIT_GRACE
+    /// the completion fires with success and CallKit fulfills the
+    /// action; if it doesn't, expireAnswer fires with failure and
+    /// CallKit fails the action — surfacing a clean "Call Failed" to
+    /// the user instead of a stuck call entry with no audio.
+    private var pendingAnswerCompletions: [String: (Error?) -> Void] = [:]
+
+    /// 5-second budget per tapped-Accept-without-INVITE. Short enough
+    /// that the user gets prompt feedback if the call won't connect;
+    /// long enough that a normal post-push REGISTER + bridge round
+    /// trip completes well inside it. Not to be confused with iOS's
+    /// own PushKit grace window (~30s) — that one handles the no-tap
+    /// case at the OS level and we don't override it.
+    private var pendingAnswerTimers: [String: DispatchWorkItem] = [:]
+    private static let ANSWER_WAIT_GRACE_SEC: TimeInterval = 5.0
 
     /// Dedicated thread for all PJSIP calls
     private let pjThread = PjsipThread()
@@ -223,67 +229,44 @@ class SipManager: NSObject {
     /// this UUID as the plugin callId so CallKit's call UUID is the
     /// same identifier across push → INVITE → answer.
     ///
-    /// Arms a grace timer matching iOS's PushKit window — if no INVITE
-    /// arrives in PUSH_TO_INVITE_GRACE_SEC the worker fires a
-    /// synthesized 'disconnected' so PjsipPlugin's delegate handler
-    /// calls callKitManager.reportCallEnded and the iPhone clears its
-    /// "in call" state. Without this, a push whose INVITE is lost (PBX
-    /// bridge sends to a different contact, network drop, etc.) leaves
-    /// CallKit stuck and the user has to force-quit the app.
+    /// No background timer here — if the user never taps Accept,
+    /// iOS's own PushKit/CallKit ring timeout (~30s, OS-controlled)
+    /// dismisses the incoming-call UI. The case we DO actively
+    /// time-bound is when the user *does* tap Accept and the INVITE
+    /// still hasn't arrived — see the 5s answer budget in
+    /// `answerCall` below.
     func expectIncomingCall(callUuid: String) {
         pjThread.performAsync { [weak self] in
-            guard let self = self else { return }
-            self.pendingCallUuids.insert(callUuid)
+            self?.pendingCallUuids.insert(callUuid)
             print("[SipManager] expectIncomingCall: now tracking \(callUuid)")
-
-            // Re-arm semantics: if a prior push for the same UUID is
-            // still in flight, cancel its worker first.
-            self.pendingCallWorkItems[callUuid]?.cancel()
-
-            let work = DispatchWorkItem { [weak self] in
-                self?.pjThread.performAsync {
-                    self?.expireCallUuid(callUuid)
-                }
-            }
-            self.pendingCallWorkItems[callUuid] = work
-            DispatchQueue.global().asyncAfter(
-                deadline: .now() + Self.PUSH_TO_INVITE_GRACE_SEC,
-                execute: work
-            )
         }
     }
 
-    /// Called from the grace timer. Cleans up the pending state and
-    /// fires a synthesized 'disconnected' delegate event so the rest
-    /// of the system (CallKit, the JS layer's call list) all observe
-    /// the same terminal state. No-op if the INVITE arrived and the
-    /// UUID is no longer pending.
-    private func expireCallUuid(_ callUuid: String) {
-        guard pendingCallUuids.contains(callUuid) else { return }
-
-        print("[SipManager] push UUID \(callUuid) expired — no INVITE in " +
-              "\(Self.PUSH_TO_INVITE_GRACE_SEC)s; cleaning up CallKit entry")
-        pendingCallUuids.remove(callUuid)
-        pendingAnswerCallUuids.remove(callUuid)
-        pendingCallWorkItems.removeValue(forKey: callUuid)
-
-        // delegate fans out on main — PjsipPlugin.onCallStateChanged
-        // routes 'disconnected' → CallKitManager.reportCallEnded.
-        DispatchQueue.main.async { [weak self] in
-            self?.delegate?.onCallStateChanged(
-                callId: callUuid,
-                state: "disconnected",
-                remoteUri: nil
-            )
-        }
-    }
-
-    /// Cancel the grace timer for a UUID. Called from handleIncomingCall
-    /// once the real INVITE has bridged to a real pjsua call, and from
-    /// hangup/unregister teardown paths.
-    private func cancelPendingTimer(callUuid: String) {
-        if let work = pendingCallWorkItems.removeValue(forKey: callUuid) {
+    /// Cancel any in-flight answer budget for this UUID. Called from
+    /// handleIncomingCall when the INVITE bridges in, and from hangup /
+    /// unregister teardown paths.
+    private func cancelAnswerTimer(callUuid: String) {
+        if let work = pendingAnswerTimers.removeValue(forKey: callUuid) {
             work.cancel()
+        }
+    }
+
+    /// Fail the held CallKit answer completion for a UUID, if any,
+    /// and clean up its bookkeeping. Used both by the 5s budget
+    /// expiry and by hangup/unregister teardown.
+    private func failPendingAnswer(callUuid: String, reason: String) {
+        cancelAnswerTimer(callUuid: callUuid)
+        pendingAnswerCallUuids.remove(callUuid)
+        guard let completion = pendingAnswerCompletions.removeValue(forKey: callUuid) else {
+            return
+        }
+        print("[SipManager] answerCall: \(callUuid) \(reason) — failing CallKit action")
+        DispatchQueue.main.async {
+            completion(NSError(
+                domain: "PjsipPlugin",
+                code: -2,
+                userInfo: [NSLocalizedDescriptionKey: reason]
+            ))
         }
     }
 
@@ -308,15 +291,15 @@ class SipManager: NSObject {
                 self.pjsuaStarted = false
             }
 
-            // Cancel any in-flight push grace timers — we're tearing
-            // the SIP stack down, no point waiting for INVITEs that
-            // would land on a destroyed pjsua.
-            for (_, work) in self.pendingCallWorkItems {
-                work.cancel()
+            // Cancel any in-flight answer budgets and fail their
+            // CallKit completions — the SIP stack is going away so
+            // no INVITE will ever bridge to them.
+            for callUuid in Array(self.pendingAnswerCompletions.keys) {
+                self.failPendingAnswer(callUuid: callUuid, reason: "SIP stack shutting down")
             }
-            self.pendingCallWorkItems.removeAll()
             self.pendingCallUuids.removeAll()
             self.pendingAnswerCallUuids.removeAll()
+            self.pendingAnswerTimers.removeAll()
 
             DispatchQueue.main.async {
                 self.registrationState = "unregistered"
@@ -524,17 +507,52 @@ class SipManager: NSObject {
         }
 
         // Slow path — push arrived but the SIP INVITE hasn't landed
-        // yet. This is the common case when the user taps Accept in
-        // CallKit the moment they see the ring; the INVITE is still
-        // in flight over TLS. Stash the callId so handleIncomingCall
-        // can auto-answer the matching pjsua call as soon as it shows
-        // up, instead of failing with "Call not found".
+        // yet. Common when the user taps Accept the moment CallKit
+        // appears; the INVITE is still in flight from the PBX over
+        // TLS. We don't fulfill or fail the CallKit action here —
+        // the completion is held until either:
+        //   - handleIncomingCall fires for the matching UUID
+        //     (INVITE arrived → auto-answer, completion(nil)), or
+        //   - the 5s budget expires (no INVITE in time →
+        //     completion(error) → CallKit fails the action and
+        //     surfaces "Call Failed" to the user cleanly).
+        // This replaces the older 30s wall-clock cleanup timer —
+        // tied to actual user intent (Accept) rather than a
+        // background watchdog.
         if pendingCallUuids.contains(callId) {
             pjThread.performAsync { [weak self] in
-                self?.pendingAnswerCallUuids.insert(callId)
-                print("[SipManager] answerCall: \(callId) pending — will auto-answer on INVITE")
+                guard let self = self else { return }
+                self.pendingAnswerCallUuids.insert(callId)
+                // Stash the CallKit completion until INVITE arrival
+                // or the budget expires. If completion is nil (e.g.
+                // an internal call from somewhere other than CallKit),
+                // we'd just drop it — but in practice the CallKit
+                // path always passes one.
+                if let completion = completion {
+                    self.pendingAnswerCompletions[callId] = completion
+                }
+                print("[SipManager] answerCall: \(callId) pending INVITE — 5s budget armed")
+
+                // Re-arm semantics: cancel any prior budget for the
+                // same UUID (shouldn't happen in practice — CallKit
+                // gives a single CXAnswerCallAction per call — but
+                // defensive).
+                self.pendingAnswerTimers[callId]?.cancel()
+
+                let work = DispatchWorkItem { [weak self] in
+                    self?.pjThread.performAsync {
+                        self?.failPendingAnswer(
+                            callUuid: callId,
+                            reason: "INVITE timeout"
+                        )
+                    }
+                }
+                self.pendingAnswerTimers[callId] = work
+                DispatchQueue.global().asyncAfter(
+                    deadline: .now() + Self.ANSWER_WAIT_GRACE_SEC,
+                    execute: work
+                )
             }
-            completion?(nil)
             return
         }
 
@@ -557,18 +575,16 @@ class SipManager: NSObject {
             return
         }
 
-        // Slow path — caller hangs up on a push-only placeholder
-        // (CallKit reported, INVITE never arrived). Cancel the grace
-        // timer and clear the pending sets so the next push for this
-        // UUID isn't stale, then synthesize a disconnect so the
-        // delegate chain (→ CallKitManager.reportCallEnded) tears
-        // down the iOS UI.
+        // Slow path — hangup on a push-only placeholder (CallKit
+        // reported, INVITE never arrived, user declined or CallKit's
+        // own ring timeout fired). Clear pending state. If the user
+        // had also tapped Accept and we're holding their CallKit
+        // answer completion, fail it so the action ends cleanly.
         if pendingCallUuids.contains(callId) {
             pjThread.performAsync { [weak self] in
                 guard let self = self else { return }
                 self.pendingCallUuids.remove(callId)
-                self.pendingAnswerCallUuids.remove(callId)
-                self.cancelPendingTimer(callUuid: callId)
+                self.failPendingAnswer(callUuid: callId, reason: "call ended before INVITE")
             }
             delegate?.onCallStateChanged(callId: callId, state: "disconnected", remoteUri: nil)
         }
@@ -679,9 +695,6 @@ class SipManager: NSObject {
         if let uuid = headerUuid {
             pluginCallId = uuid
             pendingCallUuids.remove(uuid)
-            // INVITE bridged — kill the grace timer so it doesn't
-            // synthesize a disconnect on top of the real call.
-            cancelPendingTimer(callUuid: uuid)
         } else {
             callIdCounter += 1
             pluginCallId = "ios-call-\(callIdCounter)"
@@ -703,12 +716,30 @@ class SipManager: NSObject {
         pjsua_call_answer(pjCallId, 180, nil, nil)
 
         // If the user already tapped Accept on CallKit while the
-        // INVITE was in flight, fire the 200 OK now — no second
-        // round-trip through CallKit needed.
+        // INVITE was in flight, fire the 200 OK now AND resolve the
+        // held CallKit answer completion (CallKitManager fulfills the
+        // CXAnswerCallAction, configures the audio session, and
+        // attaches to the now-real pjsua call). The 5s budget timer
+        // is cancelled in the same step so it doesn't fail what
+        // we just succeeded.
         if pendingAnswerCallUuids.contains(pluginCallId) {
             pendingAnswerCallUuids.remove(pluginCallId)
+            cancelAnswerTimer(callUuid: pluginCallId)
             let status = pjsua_call_answer(pjCallId, 200, nil, nil)
+            let answeredOk = (status == Int32(PJ_SUCCESS.rawValue))
             print("[SipManager] auto-answered pending \(pluginCallId) status=\(status)")
+            if let completion = pendingAnswerCompletions.removeValue(forKey: pluginCallId) {
+                DispatchQueue.main.async { [weak self] in
+                    if answeredOk {
+                        completion(nil)
+                    } else {
+                        completion(self?.sipError(
+                            "pjsua_call_answer failed",
+                            status: status
+                        ))
+                    }
+                }
+            }
         }
 
         DispatchQueue.main.async { [weak self] in

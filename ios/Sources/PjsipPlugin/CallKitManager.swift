@@ -3,7 +3,14 @@ import CallKit
 import AVFoundation
 
 protocol CallKitManagerDelegate: AnyObject {
-    func callKitDidAnswerCall(callId: String)
+    /// Called when the user taps Accept in CallKit. The delegate MUST
+    /// call `completion(true)` when the underlying SIP call has been
+    /// answered, or `completion(false)` if the answer attempt failed
+    /// (e.g. no INVITE arrived in time after a VoIP push). CallKit
+    /// then either fulfills or fails the CXAnswerCallAction —
+    /// failing surfaces a clean "Call Failed" to the user instead of
+    /// a stuck call entry with no audio.
+    func callKitDidAnswerCall(callId: String, completion: @escaping (Bool) -> Void)
     func callKitDidEndCall(callId: String)
     func callKitDidSetHeld(callId: String, isOnHold: Bool)
     func callKitDidSetMuted(callId: String, isMuted: Bool)
@@ -98,9 +105,23 @@ extension CallKitManager: CXProviderDelegate {
             return
         }
 
-        configureAudioSession()
-        delegate?.callKitDidAnswerCall(callId: callId)
-        action.fulfill()
+        // Defer fulfill — we don't know yet if the answer will
+        // actually succeed. If the call is push-only (CallKit-reported
+        // from a VoIP push, INVITE not yet received), the delegate
+        // will hold the completion until the INVITE lands or a short
+        // grace window expires. That avoids fulfilling the action and
+        // then having AVAudioSession activation silently fail with
+        // nothing for CallKit to attach audio to.
+        delegate?.callKitDidAnswerCall(callId: callId) { [weak self] success in
+            DispatchQueue.main.async {
+                if success {
+                    self?.configureAudioSession()
+                    action.fulfill()
+                } else {
+                    action.fail()
+                }
+            }
+        }
     }
 
     func provider(_ provider: CXProvider, perform action: CXEndCallAction) {
