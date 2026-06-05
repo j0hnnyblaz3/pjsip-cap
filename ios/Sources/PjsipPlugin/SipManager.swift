@@ -109,6 +109,16 @@ class SipManager: NSObject {
     /// flag + accountId make those calls idempotent.
     private var transportCreated = false
 
+    /// The transport id pjsua_transport_create returned. Stored so we
+    /// can bind the account to this specific transport — without an
+    /// explicit accCfg.transport_id, PJSIP picks UDP by default (and
+    /// fails with PJSIP_EUNSUPTRANSPORT if only a TLS listener exists).
+    private var transportId: pjsua_transport_id = -1
+    /// What kind of transport was created — drives the ;transport= tag
+    /// we append to the registration URI so the SBC routes the REGISTER
+    /// over the right protocol.
+    private var transportType: pjsip_transport_type_e = PJSIP_TRANSPORT_UDP
+
     // MARK: - Push correlation state
     //
     // When a VoIP push arrives, iOS requires we report a call to CallKit
@@ -220,6 +230,8 @@ class SipManager: NSObject {
             // we're done here the next register() needs to recreate
             // both the account and the transport.
             self.transportCreated = false
+            self.transportId = -1
+            self.transportType = PJSIP_TRANSPORT_UDP
 
             if self.pjsuaStarted {
                 pjsua_destroy()
@@ -276,28 +288,29 @@ class SipManager: NSObject {
         // listeners and eventually exhausts PJSIP slots.
         guard !transportCreated else { return }
 
-        var transportType: pjsip_transport_type_e
-
+        let type: pjsip_transport_type_e
         switch config.transport.lowercased() {
         case "tcp":
-            transportType = PJSIP_TRANSPORT_TCP
+            type = PJSIP_TRANSPORT_TCP
         case "tls":
-            transportType = PJSIP_TRANSPORT_TLS
+            type = PJSIP_TRANSPORT_TLS
         case "wss":
-            transportType = PJSIP_TRANSPORT_TLS
+            type = PJSIP_TRANSPORT_TLS
         default:
-            transportType = PJSIP_TRANSPORT_UDP
+            type = PJSIP_TRANSPORT_UDP
         }
 
         var transportCfg = pjsua_transport_config()
         pjsua_transport_config_default(&transportCfg)
 
-        var transportId: pjsua_transport_id = -1
-        let status = pjsua_transport_create(transportType, &transportCfg, &transportId)
+        var newId: pjsua_transport_id = -1
+        let status = pjsua_transport_create(type, &transportCfg, &newId)
         guard status == Int32(PJ_SUCCESS.rawValue) else {
             throw sipError("pjsua_transport_create failed", status: status)
         }
         transportCreated = true
+        transportId = newId
+        transportType = type
     }
 
     private func startPjsua() throws {
@@ -332,11 +345,31 @@ class SipManager: NSObject {
         var accCfg = pjsua_acc_config()
         pjsua_acc_config_default(&accCfg)
 
+        // Tag the registration URI with the actual transport. Without
+        // this, PJSIP defaults to UDP — which fails with
+        // PJSIP_EUNSUPTRANSPORT when we only have a TLS listener.
         let sipUri = "sip:\(config.username)@\(config.domain)"
-        let regUri = "sip:\(config.server):\(config.port)"
+        let regUri: String = {
+            switch transportType {
+            case PJSIP_TRANSPORT_TLS:
+                return "sip:\(config.server):\(config.port);transport=tls"
+            case PJSIP_TRANSPORT_TCP:
+                return "sip:\(config.server):\(config.port);transport=tcp"
+            default:
+                return "sip:\(config.server):\(config.port)"
+            }
+        }()
 
         accCfg.id = pj_str_from_swift(sipUri)
         accCfg.reg_uri = pj_str_from_swift(regUri)
+
+        // Bind the account to the transport we created. Belt-and-
+        // suspenders with the ;transport= tag — pjsua_acc still has
+        // to find an outbound transport when building the Contact
+        // header, and explicit binding is the reliable way.
+        if transportId != -1 {
+            accCfg.transport_id = transportId
+        }
 
         accCfg.cred_count = 1
         accCfg.cred_info.0.realm = pj_str_from_swift("*")
