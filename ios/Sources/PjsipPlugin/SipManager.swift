@@ -796,22 +796,31 @@ class SipManager: NSObject {
     /// Snapshot every call PJSIP is still tracking, for client-side
     /// recovery after a webview reload. Authoritative: state/remote come
     /// straight from `pjsua_call_get_info`, not cached bookkeeping.
+    ///
+    /// Must run on `pjThread` — `pjsua_call_get_info` calls `pj_thread_this`
+    /// internally, which asserts when invoked from a thread pjlib didn't
+    /// register. The Capacitor bridge calls this on its own queue, so
+    /// without performSync the assertion crashes the app on resume /
+    /// during reconcile polls.
     func getActiveCalls() -> [[String: Any]] {
         var calls: [[String: Any]] = []
-        for (pluginCallId, pjCallId) in reverseCallMap {
-            guard let info = getCallInfo(pjCallId) else { continue }
-            if info.state == PJSIP_INV_STATE_DISCONNECTED
-                || info.state == PJSIP_INV_STATE_NULL { continue }
-            let remoteUri = pjStringToSwift(info.remote_info)
-            var entry: [String: Any] = [
-                "callId": pluginCallId,
-                "state": mapCallState(info.state),
-            ]
-            if !remoteUri.isEmpty { entry["remoteUri"] = remoteUri }
-            if let name = extractDisplayName(from: remoteUri) {
-                entry["callerName"] = name
+        pjThread.performSync { [weak self] in
+            guard let self = self else { return }
+            for (pluginCallId, pjCallId) in self.reverseCallMap {
+                guard let info = self.getCallInfo(pjCallId) else { continue }
+                if info.state == PJSIP_INV_STATE_DISCONNECTED
+                    || info.state == PJSIP_INV_STATE_NULL { continue }
+                let remoteUri = pjStringToSwift(info.remote_info)
+                var entry: [String: Any] = [
+                    "callId": pluginCallId,
+                    "state": mapCallState(info.state),
+                ]
+                if !remoteUri.isEmpty { entry["remoteUri"] = remoteUri }
+                if let name = extractDisplayName(from: remoteUri) {
+                    entry["callerName"] = name
+                }
+                calls.append(entry)
             }
-            calls.append(entry)
         }
         return calls
     }
