@@ -337,7 +337,15 @@ class SipManager: NSObject {
 
         var mediaCfg = pjsua_media_config()
         pjsua_media_config_default(&mediaCfg)
-        mediaCfg.snd_auto_close_time = -1  // Keep sound device open
+        // Close the sound device promptly when no call is using it.
+        // Previously this was -1 (always open) which caused
+        //   capdbuf  Underflow, buf_cnt=0, will generate 1 frame
+        // to spam the log continuously — PJSIP was polling the mic
+        // 50× per second with nowhere to send the data. A 1-second
+        // idle close keeps rapid call sequences fast (no reopen
+        // penalty between back-to-back calls) without burning CPU
+        // or filling the log when idle.
+        mediaCfg.snd_auto_close_time = 1
 
         status = pjsua_init(&cfg, &logCfg, &mediaCfg)
         guard status == Int32(PJ_SUCCESS.rawValue) else {

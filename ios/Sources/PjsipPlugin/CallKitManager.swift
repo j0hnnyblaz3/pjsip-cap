@@ -160,23 +160,48 @@ extension CallKitManager: CXProviderDelegate {
     }
 
     func provider(_ provider: CXProvider, didActivate audioSession: AVAudioSession) {
-        // PJSIP should be notified that audio session is active
-        // TODO: Notify PJSIP to start audio
+        // CallKit just activated AVAudioSession for the call. PJSIP's
+        // coreaudio backend is now able to capture from the mic and
+        // play through the speaker — the actual mic↔speaker↔SIP
+        // routing is wired by `handleCallMediaState` when the call's
+        // media transitions to PJSUA_CALL_MEDIA_ACTIVE (i.e. after
+        // 200 OK / ACK exchange). Nothing else to do here except log
+        // — but the log is useful, because "missing this event" is
+        // the first thing to check when calls have no audio.
+        print("[CallKitManager] AVAudioSession activated by CallKit")
     }
 
     func provider(_ provider: CXProvider, didDeactivate audioSession: AVAudioSession) {
-        // TODO: Notify PJSIP to stop audio
+        // CallKit will deactivate when all calls end. PJSIP's audio
+        // device stops polling automatically when the session goes
+        // inactive (coreaudio_dev follows AVAudioSession state).
+        print("[CallKitManager] AVAudioSession deactivated by CallKit")
     }
 
     // MARK: - Audio Session
 
+    /// Configure the AVAudioSession category for a voice call.
+    /// Deliberately does NOT call `setActive(true)` — per Apple's
+    /// CallKit documentation, the framework activates the session
+    /// itself once the call action is fulfilled. Calling setActive
+    /// ourselves races CallKit's activation and leaves the session
+    /// in a half-state where AVAudioSession reports "active" but
+    /// PJSIP's coreaudio backend can't open the device — calls
+    /// connect but no audio flows in either direction.
+    ///
+    /// Setting the category here (before action.fulfill) is fine
+    /// and is actually required — CallKit only handles activation,
+    /// not category selection.
     private func configureAudioSession() {
         let session = AVAudioSession.sharedInstance()
         do {
-            try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.allowBluetooth])
-            try session.setActive(true)
+            try session.setCategory(
+                .playAndRecord,
+                mode: .voiceChat,
+                options: [.allowBluetooth, .allowBluetoothA2DP, .duckOthers]
+            )
         } catch {
-            print("[CallKitManager] Audio session error: \(error)")
+            print("[CallKitManager] Audio session category error: \(error)")
         }
     }
 }
