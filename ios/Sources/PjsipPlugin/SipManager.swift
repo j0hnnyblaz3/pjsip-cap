@@ -101,6 +101,14 @@ class SipManager: NSObject {
     /// Whether pjsua_create + pjsua_init + pjsua_start have been called
     private var pjsuaStarted = false
 
+    /// Whether a SIP transport has been created via pjsua_transport_create.
+    /// Like accountId, this is a per-process resource — calling
+    /// pjsua_transport_create again leaks a listener and at some point
+    /// exhausts PJSIP's transport slots. The JS layer calls register()
+    /// on every reconnect / resume; the guards on startPjsua + this
+    /// flag + accountId make those calls idempotent.
+    private var transportCreated = false
+
     // MARK: - Push correlation state
     //
     // When a VoIP push arrives, iOS requires we report a call to CallKit
@@ -208,6 +216,11 @@ class SipManager: NSObject {
                 self.accountId = -1
             }
 
+            // pjsua_destroy tears the transport down for us, so once
+            // we're done here the next register() needs to recreate
+            // both the account and the transport.
+            self.transportCreated = false
+
             if self.pjsuaStarted {
                 pjsua_destroy()
                 self.pjsuaStarted = false
@@ -259,6 +272,10 @@ class SipManager: NSObject {
     }
 
     private func createTransport(config: SipConfig) throws {
+        // Idempotent — transport is per-process. Re-creating leaks
+        // listeners and eventually exhausts PJSIP slots.
+        guard !transportCreated else { return }
+
         var transportType: pjsip_transport_type_e
 
         switch config.transport.lowercased() {
@@ -280,6 +297,7 @@ class SipManager: NSObject {
         guard status == Int32(PJ_SUCCESS.rawValue) else {
             throw sipError("pjsua_transport_create failed", status: status)
         }
+        transportCreated = true
     }
 
     private func startPjsua() throws {
@@ -294,6 +312,23 @@ class SipManager: NSObject {
     }
 
     private func addAccount(config: SipConfig) throws {
+        // Idempotent — every call to pjsua_acc_add consumes a slot
+        // from PJSUA_MAX_ACC (8 by default). The JS layer calls
+        // register() on every reconnect / resume; without this guard,
+        // the ~8th invocation crashes with an assertion in pjsua_acc_add.
+        // When we already have an account, just trigger a re-REGISTER
+        // (covers the "config refresh" case JS expects) and return.
+        if accountId != -1 {
+            let status = pjsua_acc_set_registration(
+                accountId,
+                pj_bool_t(PJ_TRUE.rawValue)
+            )
+            if status != Int32(PJ_SUCCESS.rawValue) {
+                print("[SipManager] addAccount: re-register failed status=\(status)")
+            }
+            return
+        }
+
         var accCfg = pjsua_acc_config()
         pjsua_acc_config_default(&accCfg)
 
