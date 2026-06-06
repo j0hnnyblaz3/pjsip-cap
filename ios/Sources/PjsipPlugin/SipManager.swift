@@ -8,11 +8,14 @@ import PjsipSDK
 /// media negotiation, during hold, etc). Those lines have zero
 /// diagnostic value and bury everything else in the log.
 ///
-/// Kept lines are re-emitted via Swift's `print()` — Capacitor +
-/// `idevicesyslog` capture stdout reliably; `fputs(stderr)` is
-/// sometimes silently dropped depending on how the host inspects
-/// the process. Using print() guarantees PJSIP's wire-trace lines
-/// (TX/RX REGISTER, INVITE, etc.) actually reach the user.
+/// Kept lines are re-emitted via `NSLog`. We tried both
+/// `fputs(stderr)` and Swift `print()` first — both got silently
+/// dropped depending on which thread PJSIP called us from (the
+/// pjsip-worker thread's stdout/stderr aren't routed to the same
+/// destination iOS's unified logging is). NSLog goes through the
+/// unified logging system, which Capacitor, idevicesyslog, and
+/// Console.app all reliably surface. Cost is a duplicated
+/// timestamp prefix on every line, which is a small price.
 ///
 /// Must be a free function with @convention(c) — PJSIP takes a raw
 /// C function pointer.
@@ -23,9 +26,9 @@ private let pjsipFilteredLogWriter: @convention(c) (Int32, UnsafePointer<CChar>?
         && msg.contains("Underflow") {
         return
     }
-    // PJSIP lines already end with \n. terminator: "" stops print
-    // from adding a second one.
-    print(msg, terminator: "")
+    // Strip PJSIP's trailing newline — NSLog adds its own line break.
+    let trimmed = msg.hasSuffix("\n") ? String(msg.dropLast()) : msg
+    NSLog("%@", trimmed as NSString)
 }
 
 struct SipConfig {
