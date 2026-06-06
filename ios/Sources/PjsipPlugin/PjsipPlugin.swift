@@ -63,12 +63,16 @@ public class PjsipPlugin: CAPPlugin, CAPBridgedPlugin {
             proxy: call.getString("proxy"),
             // SRTP policy passes through from the JS layer's
             // srtpPolicy field. Accept "disabled" | "optional" |
-            // "mandatory". Default optional — modern SBCs that
-            // also serve WebRTC clients (which mandate SRTP)
-            // typically reject plain RTP offers, and our previous
-            // default of disabled is what caused outbound calls
-            // to set up but never get media.
-            srtp: call.getString("srtpPolicy") ?? "optional"
+            // "mandatory". Default MANDATORY — modern SBCs (including
+            // FreeSWITCH behind dSIPRouter, which is what Redyrect
+            // runs) accept clean RTP/SAVP profile offers but reject
+            // the OPTIONAL hybrid (RTP/AVP profile with embedded
+            // crypto attribute). MANDATORY matches the TLS/HIPAA
+            // encryption posture: the SDP m-line says RTP/SAVP, FS
+            // accepts, audio is end-to-end SRTP all the way to the
+            // SBC. To run unencrypted, set srtpPolicy = "disabled"
+            // via the admin VoIP overrides.
+            srtp: call.getString("srtpPolicy") ?? "mandatory"
         )
 
         sipManager.register(config: config) { error in
