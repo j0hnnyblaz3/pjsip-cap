@@ -69,6 +69,13 @@ extension PushManager: PKPushRegistryDelegate {
 
         let data = payload.dictionaryPayload
 
+        // Dump full payload (keys + values) so we can verify what the
+        // PBX actually sent and catch field-name mismatches the moment
+        // they happen instead of waiting for "call_uuid missing" silent
+        // fallbacks downstream.
+        let pairs = data.map { "\($0.key)=\($0.value)" }.sorted().joined(separator: " | ")
+        print("[PushManager] VoIP push received | \(pairs)")
+
         // Extract call info from the push payload. The PBX sends:
         //   {
         //     "call_uuid": "<freeswitch-channel-uuid>",

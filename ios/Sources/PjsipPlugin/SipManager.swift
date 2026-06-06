@@ -8,10 +8,11 @@ import PjsipSDK
 /// media negotiation, during hold, etc). Those lines have zero
 /// diagnostic value and bury everything else in the log.
 ///
-/// Installed via `pj_log_set_log_func` before `pjsua_init`, so all
-/// PJSIP output flows through here. We re-emit kept lines to stderr
-/// — which on iOS goes to NSLog / Xcode console / the user's log
-/// capture, matching PJSIP's default destination.
+/// Kept lines are re-emitted via Swift's `print()` — Capacitor +
+/// `idevicesyslog` capture stdout reliably; `fputs(stderr)` is
+/// sometimes silently dropped depending on how the host inspects
+/// the process. Using print() guarantees PJSIP's wire-trace lines
+/// (TX/RX REGISTER, INVITE, etc.) actually reach the user.
 ///
 /// Must be a free function with @convention(c) — PJSIP takes a raw
 /// C function pointer.
@@ -22,7 +23,9 @@ private let pjsipFilteredLogWriter: @convention(c) (Int32, UnsafePointer<CChar>?
         && msg.contains("Underflow") {
         return
     }
-    fputs(msg, stderr)
+    // PJSIP lines already end with \n. terminator: "" stops print
+    // from adding a second one.
+    print(msg, terminator: "")
 }
 
 struct SipConfig {
@@ -238,8 +241,13 @@ class SipManager: NSObject {
     /// where SIP isn't configured) — there's nothing to refresh.
     func forceRegister() {
         pjThread.performAsync { [weak self] in
-            guard let self = self, self.accountId != -1 else {
-                print("[SipManager] forceRegister: no account — skipping")
+            guard let self = self else { return }
+            print("[SipManager] forceRegister: state=\(self.registrationState) "
+                + "accountId=\(self.accountId) transportId=\(self.transportId) "
+                + "transportType=\(self.transportType.rawValue) "
+                + "server=\(self.config?.server ?? "<nil>"):\(self.config?.port ?? -1)")
+            guard self.accountId != -1 else {
+                print("[SipManager] forceRegister: no account — skipping (call setup will hit Call not found)")
                 return
             }
             let status = pjsua_acc_set_registration(
@@ -247,7 +255,7 @@ class SipManager: NSObject {
                 pj_bool_t(PJ_TRUE.rawValue)
             )
             if status == Int32(PJ_SUCCESS.rawValue) {
-                print("[SipManager] forceRegister: REGISTER triggered")
+                print("[SipManager] forceRegister: pjsua_acc_set_registration ok")
             } else {
                 print("[SipManager] forceRegister failed status=\(status)")
             }
@@ -268,8 +276,16 @@ class SipManager: NSObject {
     /// `answerCall` below.
     func expectIncomingCall(callUuid: String) {
         pjThread.performAsync { [weak self] in
-            self?.pendingCallUuids.insert(callUuid)
-            print("[SipManager] expectIncomingCall: now tracking \(callUuid)")
+            guard let self = self else { return }
+            self.pendingCallUuids.insert(callUuid)
+            // Snapshot of state at push time so we can diagnose
+            // "INVITE never arrived" failures. If accountId == -1
+            // we haven't registered yet — the PBX has no contact
+            // to send to and this call will fail.
+            print("[SipManager] expectIncomingCall: callUuid=\(callUuid) "
+                + "regState=\(self.registrationState) accountId=\(self.accountId) "
+                + "activeCalls=\(self.reverseCallMap.count) "
+                + "pendingPushSet=\(self.pendingCallUuids.sorted())")
         }
     }
 
@@ -291,7 +307,16 @@ class SipManager: NSObject {
         guard let completion = pendingAnswerCompletions.removeValue(forKey: callUuid) else {
             return
         }
-        print("[SipManager] answerCall: \(callUuid) \(reason) — failing CallKit action")
+        // Dump full diagnostic context so we can trace where the
+        // INVITE was supposed to land but didn't. If activeCalls is
+        // 0 here, PJSIP never received a single SIP message on this
+        // dialog — the issue is upstream of pjsua (PBX bridge picked
+        // the wrong contact, INVITE lost in transit, etc).
+        print("[SipManager] failPendingAnswer: callUuid=\(callUuid) reason=\(reason) "
+            + "regState=\(registrationState) accountId=\(accountId) "
+            + "activeCalls=\(reverseCallMap.count) "
+            + "pendingPushSet=\(pendingCallUuids.sorted()) "
+            + "pendingAnswerSet=\(pendingAnswerCallUuids.sorted())")
         DispatchQueue.main.async {
             completion(NSError(
                 domain: "PjsipPlugin",
@@ -363,13 +388,22 @@ class SipManager: NSObject {
 
         var logCfg = pjsua_logging_config()
         pjsua_logging_config_default(&logCfg)
-        logCfg.level = 4
+        // Level 5 dumps every TX/RX SIP message body, transport-layer
+        // events (TLS handshake, socket open/close), call state
+        // transitions, media negotiation. The chatty audio-buffer
+        // underflow lines that fire at this level are dropped by
+        // pjsipFilteredLogWriter; everything else passes through.
+        logCfg.level = 5
         // console_level=0 stops PJSIP's built-in stderr writer.
-        // Combined with logCfg.cb below, this means every PJSIP log
-        // line flows through our filter exactly once — no built-in
-        // writer producing duplicates with the spammy
-        // capdbuf/playdbuf lines we wanted to drop.
+        // Combined with logCfg.cb below, every PJSIP log line flows
+        // through our filter exactly once — no built-in writer
+        // producing duplicates with the capdbuf/playdbuf lines we
+        // wanted to drop.
         logCfg.console_level = 0
+        // msg_logging is true by default but set explicitly so we
+        // never lose SIP wire-trace dumps even if a future PJSIP
+        // version changes defaults.
+        logCfg.msg_logging = pj_bool_t(PJ_TRUE.rawValue)
         logCfg.cb = pjsipFilteredLogWriter
 
         var mediaCfg = pjsua_media_config()
@@ -826,6 +860,18 @@ class SipManager: NSObject {
     }
 
     func handleIncomingCall(accountId: pjsua_acc_id, pjCallId: pjsua_call_id, rdata: UnsafeMutablePointer<pjsip_rx_data>?) {
+        // Diagnostic: PJSIP's on_incoming_call fired, which means we
+        // received a SIP INVITE. Log everything we can pull off the
+        // wire — header presence, pending push correlation, basic
+        // routing info. If this line appears in the user's log, the
+        // INVITE actually arrived; if it doesn't, the PBX never sent
+        // one (or it was lost upstream of pjsua).
+        let headerUuid = parseRedyrectCallUuid(rdata: rdata)
+        print("[SipManager] handleIncomingCall: pjCallId=\(pjCallId) "
+            + "X-Redyrect-Call-UUID=\(headerUuid ?? "<not present>") "
+            + "pendingPushSet=\(pendingCallUuids.sorted()) "
+            + "pendingAnswerSet=\(pendingAnswerCallUuids.sorted())")
+
         // Try to read X-Redyrect-Call-UUID from the INVITE. The PBX
         // stamps this with FreeSWITCH's channel UUID — the same value
         // that landed in the VoIP push payload's `call_uuid` field.
@@ -833,14 +879,15 @@ class SipManager: NSObject {
         // CallKit, pjsua, and the JS layer all share one identifier
         // from push → INVITE → answer. Otherwise we fall back to the
         // synthetic ios-call-N (foreground inbound case, no push).
-        let headerUuid = parseRedyrectCallUuid(rdata: rdata)
         let pluginCallId: String
         if let uuid = headerUuid {
             pluginCallId = uuid
-            pendingCallUuids.remove(uuid)
+            let wasPending = pendingCallUuids.remove(uuid) != nil
+            print("[SipManager] handleIncomingCall: bridged to push placeholder=\(wasPending) pluginCallId=\(uuid)")
         } else {
             callIdCounter += 1
             pluginCallId = "ios-call-\(callIdCounter)"
+            print("[SipManager] handleIncomingCall: synthesized pluginCallId=\(pluginCallId) (foreground inbound, no push correlation)")
         }
 
         callMap[pjCallId] = pluginCallId
