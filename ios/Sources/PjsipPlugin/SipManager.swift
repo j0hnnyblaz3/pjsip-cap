@@ -401,6 +401,81 @@ class SipManager: NSObject {
             throw sipError("pjsua_start failed", status: status)
         }
         pjsuaStarted = true
+
+        // After pjsua_start, the codec subsystem is initialized and we
+        // can enumerate + reprioritize. Without this, PJSIP offers its
+        // full compiled-in codec list (PCMU, PCMA, G722, iLBC, GSM,
+        // several speex variants, L16 at multiple sample rates, opus
+        // when enabled, telephone-event) — fine for SIP↔SIP but
+        // unfriendly to PSTN gateways behind dSIPRouter / similar
+        // SBCs, which can respond 488 Not Acceptable Here / Q.850
+        // cause 88 INCOMPATIBLE_DESTINATION when the offer is too
+        // broad or contains profiles their carrier link can't match.
+        configureCodecs()
+    }
+
+    /// Narrow the offered codec set to what PSTN trunks and modern
+    /// SBCs actually negotiate cleanly. Priority order:
+    ///   1. PCMU/8000   (G.711 μ-law)  — universal PSTN
+    ///   2. PCMA/8000   (G.711 a-law)  — universal PSTN (EU origin)
+    ///   3. G722/8000   (wideband HD)  — when both legs support it
+    ///   4. opus/48000  (WebRTC interop) — for SBC bridges to web clients
+    ///   5. telephone-event/8000 — DTMF, must stay enabled
+    /// Everything else disabled. To add a codec back, bump its
+    /// priority above 0 here.
+    private func configureCodecs() {
+        // Enumerate first so the log shows what's actually available
+        // in this PJSIP build — invaluable for diagnosing "why is
+        // codec X missing from my SDP offer".
+        var codecCount: pj_uint32_t = 64
+        var codecs = Array(repeating: pjsua_codec_info(), count: 64)
+        let enumStatus = pjsua_enum_codecs(&codecs, &codecCount)
+        guard enumStatus == Int32(PJ_SUCCESS.rawValue) else {
+            print("[SipManager] pjsua_enum_codecs failed status=\(enumStatus)")
+            return
+        }
+
+        print("[SipManager] PJSIP compiled-in codecs (\(codecCount)):")
+        for i in 0..<Int(codecCount) {
+            let id = pjStringToSwift(codecs[i].codec_id)
+            print("  - \(id) (default priority=\(codecs[i].priority))")
+        }
+
+        // Apply priorities. Codec IDs are case-sensitive in pjsua —
+        // they're matched against the registered factory names.
+        let priorities: [(String, UInt8)] = [
+            ("PCMU/8000", 240),
+            ("PCMA/8000", 230),
+            ("G722/8000", 220),
+            ("opus/48000", 210),
+            ("telephone-event/8000", 200),
+        ]
+
+        // First pass: disable everything by setting priority to 0.
+        // We re-enable the wanted ones in the second pass. Doing it
+        // this way means new codecs that appear in future PJSIP
+        // versions are off by default — safer than allow-listing
+        // every possible new codec name.
+        for i in 0..<Int(codecCount) {
+            var id = codecs[i].codec_id
+            let status = pjsua_codec_set_priority(&id, 0)
+            if status != Int32(PJ_SUCCESS.rawValue) {
+                print("[SipManager] disable codec failed for \(pjStringToSwift(id)) status=\(status)")
+            }
+        }
+
+        // Second pass: re-enable the wanted ones with priority.
+        for (name, prio) in priorities {
+            var id = pj_str_from_swift(name)
+            let status = pjsua_codec_set_priority(&id, prio)
+            if status == Int32(PJ_SUCCESS.rawValue) {
+                print("[SipManager] codec enabled: \(name) priority=\(prio)")
+            } else {
+                // Not a hard failure — the codec may not be compiled
+                // into this PJSIP build. e.g. opus is conditional.
+                print("[SipManager] codec \(name) not available (status=\(status))")
+            }
+        }
     }
 
     private func addAccount(config: SipConfig) throws {
