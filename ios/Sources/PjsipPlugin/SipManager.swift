@@ -2,6 +2,29 @@ import Foundation
 import AVFoundation
 import PjsipSDK
 
+/// Custom log writer that filters out the spammy capdbuf/playdbuf
+/// underflow chatter PJSIP emits every ~20ms whenever the audio
+/// device is open but no media is flowing (between call setup and
+/// media negotiation, during hold, etc). Those lines have zero
+/// diagnostic value and bury everything else in the log.
+///
+/// Installed via `pj_log_set_log_func` before `pjsua_init`, so all
+/// PJSIP output flows through here. We re-emit kept lines to stderr
+/// — which on iOS goes to NSLog / Xcode console / the user's log
+/// capture, matching PJSIP's default destination.
+///
+/// Must be a free function with @convention(c) — PJSIP takes a raw
+/// C function pointer.
+private let pjsipFilteredLogWriter: @convention(c) (Int32, UnsafePointer<CChar>?, Int32) -> Void = { _, data, _ in
+    guard let data = data else { return }
+    let msg = String(cString: data)
+    if (msg.contains("capdbuf") || msg.contains("playdbuf"))
+        && msg.contains("Underflow") {
+        return
+    }
+    fputs(msg, stderr)
+}
+
 struct SipConfig {
     let server: String
     let port: Int
@@ -341,7 +364,13 @@ class SipManager: NSObject {
         var logCfg = pjsua_logging_config()
         pjsua_logging_config_default(&logCfg)
         logCfg.level = 4
-        logCfg.console_level = 4
+        // console_level=0 stops PJSIP's built-in stderr writer.
+        // Combined with logCfg.cb below, this means every PJSIP log
+        // line flows through our filter exactly once — no built-in
+        // writer producing duplicates with the spammy
+        // capdbuf/playdbuf lines we wanted to drop.
+        logCfg.console_level = 0
+        logCfg.cb = pjsipFilteredLogWriter
 
         var mediaCfg = pjsua_media_config()
         pjsua_media_config_default(&mediaCfg)
