@@ -194,6 +194,22 @@ class SipManager: NSObject {
     private var pendingAnswerTimers: [String: DispatchWorkItem] = [:]
     private static let ANSWER_WAIT_GRACE_SEC: TimeInterval = 5.0
 
+    /// Insertion-order tracking for pendingCallUuids so we can evict
+    /// the oldest when a PBX storm tries to balloon the set. Parallel
+    /// to the Set above — the Set is for O(1) lookup, this Array
+    /// gives us FIFO eviction.
+    private var pendingCallUuidsOrder: [String] = []
+    private static let MAX_PENDING_PUSHES = 8
+
+    /// Debounce for forceRegister. The PBX storm fires this dozens of
+    /// times per second; each call to pjsua_acc_set_registration that
+    /// arrives while a previous REGISTER is in flight returns
+    /// PJ_EBUSY (171001). Trying to REGISTER more than once a second
+    /// has no upside anyway — even if iOS just suspended us, the TLS
+    /// socket re-establishment takes a beat.
+    private var lastForceRegisterAt: Date?
+    private static let FORCE_REGISTER_DEBOUNCE_SEC: TimeInterval = 1.0
+
     /// Dedicated thread for all PJSIP calls
     private let pjThread = PjsipThread()
 
@@ -245,6 +261,19 @@ class SipManager: NSObject {
     func forceRegister() {
         pjThread.performAsync { [weak self] in
             guard let self = self else { return }
+            // Debounce — a PBX push storm calls this dozens of times
+            // per second and every call after the first immediately
+            // returns PJ_EBUSY (171001) because the prior REGISTER
+            // is still in flight. Skipping after the first within a
+            // 1s window saves the noise without losing useful work.
+            let now = Date()
+            if let last = self.lastForceRegisterAt,
+               now.timeIntervalSince(last) < Self.FORCE_REGISTER_DEBOUNCE_SEC {
+                let dtMs = Int(now.timeIntervalSince(last) * 1000)
+                print("[SipManager] forceRegister: debounced (last \(dtMs)ms ago, window \(Int(Self.FORCE_REGISTER_DEBOUNCE_SEC * 1000))ms)")
+                return
+            }
+            self.lastForceRegisterAt = now
             print("[SipManager] forceRegister: state=\(self.registrationState) "
                 + "accountId=\(self.accountId) transportId=\(self.transportId) "
                 + "transportType=\(self.transportType.rawValue) "
@@ -280,7 +309,7 @@ class SipManager: NSObject {
     func expectIncomingCall(callUuid: String) {
         pjThread.performAsync { [weak self] in
             guard let self = self else { return }
-            self.pendingCallUuids.insert(callUuid)
+            self.addPendingCallUuid(callUuid)
             // Snapshot of state at push time so we can diagnose
             // "INVITE never arrived" failures. If accountId == -1
             // we haven't registered yet — the PBX has no contact
@@ -288,7 +317,45 @@ class SipManager: NSObject {
             print("[SipManager] expectIncomingCall: callUuid=\(callUuid) "
                 + "regState=\(self.registrationState) accountId=\(self.accountId) "
                 + "activeCalls=\(self.reverseCallMap.count) "
-                + "pendingPushSet=\(self.pendingCallUuids.sorted())")
+                + "pendingPushSet=\(self.pendingCallUuidsOrder)")
+        }
+    }
+
+    /// Insert into both the Set (lookup) and the Order array (FIFO).
+    /// Evict the oldest entries when capacity is exceeded so a PBX
+    /// push storm can't grow the set unboundedly. The set was
+    /// previously seen at 50+ entries during the worst storm, which
+    /// made the diagnostic logs unreadable and bloated the heap.
+    private func addPendingCallUuid(_ uuid: String) {
+        if pendingCallUuids.contains(uuid) { return }
+        pendingCallUuids.insert(uuid)
+        pendingCallUuidsOrder.append(uuid)
+        while pendingCallUuidsOrder.count > Self.MAX_PENDING_PUSHES {
+            let evicted = pendingCallUuidsOrder.removeFirst()
+            pendingCallUuids.remove(evicted)
+            pendingAnswerCallUuids.remove(evicted)
+            cancelAnswerTimer(callUuid: evicted)
+            // If the evicted call had a held CallKit answer
+            // completion, fail it cleanly so CallKit dismisses
+            // instead of waiting forever.
+            if let completion = pendingAnswerCompletions.removeValue(forKey: evicted) {
+                DispatchQueue.main.async {
+                    completion(NSError(
+                        domain: "PjsipPlugin",
+                        code: -3,
+                        userInfo: [NSLocalizedDescriptionKey: "evicted by push-storm cap"]
+                    ))
+                }
+            }
+            print("[SipManager] addPendingCallUuid: evicted \(evicted) (cap=\(Self.MAX_PENDING_PUSHES) reached)")
+        }
+    }
+
+    /// Remove from both structures. Idempotent.
+    private func removePendingCallUuid(_ uuid: String) {
+        pendingCallUuids.remove(uuid)
+        if let idx = pendingCallUuidsOrder.firstIndex(of: uuid) {
+            pendingCallUuidsOrder.remove(at: idx)
         }
     }
 
@@ -357,8 +424,10 @@ class SipManager: NSObject {
                 self.failPendingAnswer(callUuid: callUuid, reason: "SIP stack shutting down")
             }
             self.pendingCallUuids.removeAll()
+            self.pendingCallUuidsOrder.removeAll()
             self.pendingAnswerCallUuids.removeAll()
             self.pendingAnswerTimers.removeAll()
+            self.lastForceRegisterAt = nil
 
             DispatchQueue.main.async {
                 self.registrationState = "unregistered"
@@ -763,7 +832,7 @@ class SipManager: NSObject {
         if pendingCallUuids.contains(callId) {
             pjThread.performAsync { [weak self] in
                 guard let self = self else { return }
-                self.pendingCallUuids.remove(callId)
+                self.removePendingCallUuid(callId)
                 self.failPendingAnswer(callUuid: callId, reason: "call ended before INVITE")
             }
             delegate?.onCallStateChanged(callId: callId, state: "disconnected", remoteUri: nil)
@@ -885,7 +954,8 @@ class SipManager: NSObject {
         let pluginCallId: String
         if let uuid = headerUuid {
             pluginCallId = uuid
-            let wasPending = pendingCallUuids.remove(uuid) != nil
+            let wasPending = pendingCallUuids.contains(uuid)
+            removePendingCallUuid(uuid)
             print("[SipManager] handleIncomingCall: bridged to push placeholder=\(wasPending) pluginCallId=\(uuid)")
         } else {
             callIdCounter += 1

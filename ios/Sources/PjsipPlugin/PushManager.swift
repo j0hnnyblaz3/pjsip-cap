@@ -37,6 +37,15 @@ class PushManager: NSObject {
 
     private var voipRegistry: PKPushRegistry?
 
+    /// Per-caller dedup state. PBX-side storms (we've seen 50+ pushes in
+    /// 6 seconds for the same caller) overwhelm CallKit (Code=106 from
+    /// reportNewIncomingCall), pjsua (PJ_EBUSY on rapid forceRegister),
+    /// and grow pendingCallUuids without bound. Storm pushes get
+    /// reported to CallKit then immediately ended — that satisfies
+    /// iOS's "must report every push" rule without spamming the user.
+    private var lastPushTimeByCaller: [String: Date] = [:]
+    private static let DEDUP_WINDOW: TimeInterval = 0.5
+
     func registerForVoIPPushes() {
         voipRegistry = PKPushRegistry(queue: DispatchQueue.main)
         voipRegistry?.delegate = self
@@ -105,7 +114,31 @@ extension PushManager: PKPushRegistryDelegate {
             return
         }
 
+        // Per-caller dedup. We've seen the PBX storm 50+ pushes in 6
+        // seconds for the same caller (looping/retry bug their side).
+        // iOS requires we report EVERY push to CallKit synchronously,
+        // so we still call reportIncomingCall — but if this is within
+        // the dedup window of an earlier push from the same caller, we
+        // immediately end the call, skip the delegate notification
+        // (no forceRegister, no expectIncomingCall, no pendingCallUuid
+        // bookkeeping), and bail. iOS sees we responded; the user
+        // doesn't see 50 vanishing call UIs flash by.
+        let dedupKey = callerName ?? handle
+        let now = Date()
+        let isDuplicate = lastPushTimeByCaller[dedupKey].map {
+            now.timeIntervalSince($0) < Self.DEDUP_WINDOW
+        } ?? false
+        lastPushTimeByCaller[dedupKey] = now
+
         callKit.reportIncomingCall(callId: callId, handle: handle, callerName: callerName)
+
+        if isDuplicate {
+            let dtMs = Int(now.timeIntervalSince(lastPushTimeByCaller[dedupKey] ?? now) * 1000)
+            print("[PushManager] dedup: duplicate push from '\(dedupKey)' within \(Int(Self.DEDUP_WINDOW * 1000))ms (Δ=\(dtMs)ms) — reported + immediately ended, delegate skipped")
+            callKit.reportCallEnded(callId: callId)
+            completion()
+            return
+        }
 
         // STEP 2: Notify delegate (plugin) so it can wake PJSIP, fire
         // an immediate REGISTER so FreeSWITCH has a live contact for
