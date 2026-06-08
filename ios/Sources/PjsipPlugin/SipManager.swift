@@ -1091,7 +1091,7 @@ class SipManager: NSObject {
         guard let info = getCallInfo(pjCallId) else { return }
 
         let pluginCallId = callMap[pjCallId] ?? "unknown-\(pjCallId)"
-        let state = mapCallState(info.state)
+        let state = effectiveCallState(info: info)
         let remoteUri = pjStringToSwift(info.remote_info)
 
         if info.state == PJSIP_INV_STATE_DISCONNECTED {
@@ -1102,6 +1102,25 @@ class SipManager: NSObject {
         DispatchQueue.main.async { [weak self] in
             self?.delegate?.onCallStateChanged(callId: pluginCallId, state: state, remoteUri: remoteUri)
         }
+    }
+
+    /// PJSIP has no separate "held" inv state — a held call stays in
+    /// PJSIP_INV_STATE_CONFIRMED and the hold lives in media_status.
+    /// The JS UI (ActiveCallScreen) needs to distinguish so the user
+    /// sees Hold flip to Resume on tap. Synthesize the "held" state
+    /// from `info.media_status` when the call is otherwise confirmed.
+    private func effectiveCallState(info: pjsua_call_info) -> String {
+        let base = mapCallState(info.state)
+        if base == "confirmed" {
+            switch info.media_status {
+            case PJSUA_CALL_MEDIA_LOCAL_HOLD,
+                 PJSUA_CALL_MEDIA_REMOTE_HOLD:
+                return "held"
+            default:
+                return "confirmed"
+            }
+        }
+        return base
     }
 
     func handleCallMediaState(pjCallId: pjsua_call_id) {
@@ -1136,6 +1155,25 @@ class SipManager: NSObject {
         default:
             break
         }
+
+        // PJSIP's hold/resume is signaled at the media layer — the
+        // inv state stays CONFIRMED across both. on_call_state never
+        // fires for hold transitions, so handleCallStateChange never
+        // re-emits the JS event. The UI then can't flip the Hold
+        // button to Resume (or back). Re-emit the effective state
+        // here whenever media transitions so React state stays in
+        // sync. effectiveCallState() picks "held" when media is in
+        // LOCAL_HOLD/REMOTE_HOLD on an otherwise confirmed call.
+        let pluginCallId = callMap[pjCallId] ?? "unknown-\(pjCallId)"
+        let state = effectiveCallState(info: info)
+        let remoteUri = pjStringToSwift(info.remote_info)
+        DispatchQueue.main.async { [weak self] in
+            self?.delegate?.onCallStateChanged(
+                callId: pluginCallId,
+                state: state,
+                remoteUri: remoteUri
+            )
+        }
     }
 
     /// Snapshot every call PJSIP is still tracking, for client-side
@@ -1158,7 +1196,10 @@ class SipManager: NSObject {
                 let remoteUri = pjStringToSwift(info.remote_info)
                 var entry: [String: Any] = [
                     "callId": pluginCallId,
-                    "state": mapCallState(info.state),
+                    // effectiveCallState picks "held" when media is in
+                    // LOCAL_HOLD/REMOTE_HOLD — so recovery polls after
+                    // app resume show the correct hold state.
+                    "state": self.effectiveCallState(info: info),
                 ]
                 if !remoteUri.isEmpty { entry["remoteUri"] = remoteUri }
                 if let name = extractDisplayName(from: remoteUri) {
