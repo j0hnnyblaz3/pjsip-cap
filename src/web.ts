@@ -173,7 +173,15 @@ export class PjsipWeb extends WebPlugin implements PjsipPlugin {
         await session.bye();
         break;
     }
-    this.sessions.delete(options.callId);
+    // Don't `sessions.delete()` here. The `setupSessionListeners`
+    // stateChange handler removes on SessionState.Terminated — which
+    // is the authoritative transition once sip.js confirms the remote
+    // (or the local timer) finalized the dialog. Optimistic cleanup
+    // here matches the bug the iOS plugin warns about ("local side
+    // cleared while the remote softphone kept showing the call as
+    // live") if our local cancel/bye/reject fails to actually reach
+    // the SBC — we'd lose the ability to retry or to surface the
+    // ongoing state to the user.
   }
 
   async getActiveCalls(): Promise<{ calls: ActiveCall[] }> {
@@ -410,6 +418,9 @@ export class PjsipWeb extends WebPlugin implements PjsipPlugin {
    *  authoritative "the other side is gone" signal independent of
    *  SIP-layer events.
    *
+   *  Also watches signalingState for hold/resume re-INVITES — see
+   *  watchHoldState for the rationale.
+   *
    *  Bound at Established (when the peer connection exists) and
    *  removed when state transitions away or the call ends. */
   private watchPeerConnectionHealth(callId: string, session: Session): void {
@@ -428,9 +439,10 @@ export class PjsipWeb extends WebPlugin implements PjsipPlugin {
         );
         pc.removeEventListener('connectionstatechange', handler);
         this.notifyCallState(callId, 'disconnected');
-        this.sessions.delete(callId);
-        // Try to send BYE on our end so the PBX cleans up its leg too —
-        // best-effort, session may already be torn down.
+        // Authoritative cleanup happens via stateChange→Terminated in
+        // setupSessionListeners. Try to send BYE on our end so the
+        // PBX cleans up its leg too — best-effort, session may
+        // already be torn down.
         try {
           void session.bye();
         } catch {
@@ -439,6 +451,66 @@ export class PjsipWeb extends WebPlugin implements PjsipPlugin {
       }
     };
     pc.addEventListener('connectionstatechange', handler);
+    this.watchHoldState(callId, session, pc);
+  }
+
+  /** Track effective hold state by inspecting the remote SDP after
+   *  every re-negotiation. The local-hold path in `holdCall` already
+   *  emits 'held'/'confirmed' explicitly when the user pauses from
+   *  THIS side, but a *remote*-initiated hold (the other party's
+   *  softphone presses Hold) arrives as an incoming re-INVITE that
+   *  changes the remote SDP direction without firing any state-
+   *  transition we were listening for. Without this watch, the iOS
+   *  plugin would show 'held' for a remote hold (it derives from
+   *  PJSIP media_status) but the web build would stay on 'confirmed'
+   *  — same call, different state.
+   *
+   *  Direction attribute readings from the REMOTE description:
+   *    - sendrecv (or absent): nobody is holding → 'confirmed'
+   *    - sendonly: remote is sending (their hold music) → 'held'
+   *    - recvonly: WE held, remote answered recvonly → 'held'
+   *    - inactive: both holds, or some IVRs idle → 'held'
+   *
+   *  Both local- and remote-initiated holds end up showing as 'held'
+   *  in the UI — the user only cares that the audio is paused, not
+   *  which side paused it. This makes the same `watchHoldState`
+   *  handler the single source of truth for hold UI on web,
+   *  redundantly emitting alongside `holdCall`'s explicit notify but
+   *  with the same state — harmless. */
+  private watchHoldState(
+    callId: string,
+    session: Session,
+    pc: RTCPeerConnection,
+  ): void {
+    // Remember the last hold-state we emitted so a noisy
+    // signalingstatechange (one fires PER negotiation step) doesn't
+    // flood the bridge with redundant events.
+    let lastHeld: boolean | null = null;
+    const evaluate = () => {
+      // Only sample on `stable` — that's when offer/answer is done
+      // and the remote description reflects the final negotiated
+      // direction. Sampling mid-negotiation reads stale state.
+      if (pc.signalingState !== 'stable') return;
+      const sdp = pc.remoteDescription?.sdp;
+      if (!sdp) return;
+      const held = isAudioHeld(sdp);
+      if (held === lastHeld) return;
+      lastHeld = held;
+      // Don't fire while the session is mid-teardown — the
+      // stateChange→Terminated path owns that surface.
+      if (
+        session.state === SessionState.Terminated ||
+        session.state === SessionState.Terminating
+      ) {
+        return;
+      }
+      this.notifyCallState(callId, held ? 'held' : 'confirmed');
+    };
+    pc.addEventListener('signalingstatechange', evaluate);
+    // Sample once at install time too — covers the case where a
+    // hold-on-answer arrives (the PBX places the leg on hold the
+    // moment the call connects, e.g. a join-after-hold transfer).
+    evaluate();
   }
 
   /**
@@ -509,4 +581,28 @@ export class PjsipWeb extends WebPlugin implements PjsipPlugin {
     }
     return el;
   }
+}
+
+/**
+ * Returns true if the SDP advertises a paused-audio direction.
+ *
+ * A standard sendrecv media line has no direction attribute (or
+ * explicitly `a=sendrecv`). When a SIP hold takes effect the SDP for
+ * the audio media line is rewritten to one of:
+ *   - `a=sendonly` — the writer sends only (typical "I'm holding you")
+ *   - `a=recvonly` — the writer receives only (typical answer to a
+ *     remote sendonly offer when WE held them)
+ *   - `a=inactive` — neither direction (mutual hold / IVR idle)
+ *
+ * Any of those, found in the REMOTE description, means the call is
+ * not flowing audio in both directions — surface as 'held' in the UI.
+ *
+ * The regex is intentionally permissive: we don't try to scope to the
+ * audio m-section, because direction attributes only ever appear with
+ * a media line above them in practice (the session-level `a=`
+ * direction in RFC 4566 §6 is vanishingly rare and would mean the
+ * same thing for our purposes anyway).
+ */
+function isAudioHeld(sdp: string): boolean {
+  return /^a=(?:sendonly|recvonly|inactive)\b/m.test(sdp);
 }
