@@ -230,12 +230,19 @@ public class PjsipPlugin: CAPPlugin, CAPBridgedPlugin {
     }
 
     // MARK: - Permissions
+    //
+    // CAPPlugin already declares checkPermissions / requestPermissions
+    // as `@objc open func` for Capacitor's standard permission
+    // protocol — these are overrides, not new methods. `override
+    // public` is required: Swift rejects an override that's less
+    // accessible than the base method, and the base is `open` (=
+    // public + overridable).
 
     /// Check current OS permission state without prompting. Returns the
     /// same shape as `requestPermissions` so a UI can decide whether
     /// to call `requestPermissions` (state=='prompt') or show a
     /// "go to Settings" nudge (state=='denied').
-    @objc func checkPermissions(_ call: CAPPluginCall) {
+    @objc override public func checkPermissions(_ call: CAPPluginCall) {
         call.resolve([
             "microphone": microphonePermissionState(),
             "camera": cameraPermissionState(),
@@ -253,7 +260,7 @@ public class PjsipPlugin: CAPPlugin, CAPBridgedPlugin {
     /// (only when the caller knows video might be used). Returns the
     /// post-request state for each so JS can branch on "denied → show
     /// nudge" without calling checkPermissions again.
-    @objc func requestPermissions(_ call: CAPPluginCall) {
+    @objc override public func requestPermissions(_ call: CAPPluginCall) {
         let askMic = call.getBool("microphone") ?? true
         let askCamera = call.getBool("camera") ?? false
 
