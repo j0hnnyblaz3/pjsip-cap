@@ -392,6 +392,14 @@ export class PjsipWeb extends WebPlugin implements PjsipPlugin {
 
   private setupSessionListeners(callId: string, session: Session): void {
     session.stateChange.addListener((state: SessionState) => {
+      // One-line trace so a "stuck in call" report can confirm whether
+      // sip.js's state machine actually transitioned. If we never see
+      // Terminating/Terminated for a call the user already hung up
+      // on, the issue is upstream of us (PBX didn't relay BYE, WSS
+      // dropped before BYE arrived, etc).
+      console.info(
+        `[capacitor-pjsip] session ${callId} → ${state}`,
+      );
       const mapped = this.mapSessionState(state, session);
       if (mapped) {
         this.notifyCallState(callId, mapped);
@@ -418,12 +426,16 @@ export class PjsipWeb extends WebPlugin implements PjsipPlugin {
     // otherwise be missed by our subscribers.
     //
     // See sip.js api/session-delegate.d.ts — onBye for established
-    // sessions, onCancel for INVITE-phase aborts.
+    // sessions, onCancel for INVITE-phase aborts. The delegate is
+    // called with the incoming Bye / Cancel request as the first arg;
+    // we ignore the body and just surface the disconnect.
     session.delegate = {
       onBye: () => {
+        console.info(`[capacitor-pjsip] onBye ${callId} (remote hangup)`);
         this.notifyCallState(callId, 'disconnected');
       },
       onCancel: () => {
+        console.info(`[capacitor-pjsip] onCancel ${callId} (remote cancel)`);
         this.notifyCallState(callId, 'disconnected');
       },
     };
