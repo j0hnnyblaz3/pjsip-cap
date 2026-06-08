@@ -61,8 +61,17 @@ class CallKitManager: NSObject {
         // whatever fresher caller info the second report carries.
         // CXProvider.reportCall(with:updated:) does that without
         // creating a new entry.
+        // Sanitize the handle BEFORE handing it to CallKit. The handle
+        // is what iOS persists to the Phone app's Recents log; a raw
+        // SIP URI / UID stays there forever. friendlyHandleValue
+        // collapses UID-shaped strings into "Circles caller" and
+        // preserves PSTN-style phone numbers.
+        let friendlyHandleString = friendlyHandleValue(
+            handle: handle,
+            callerName: callerName,
+        )
         let update = CXCallUpdate()
-        update.remoteHandle = CXHandle(type: .generic, value: handle)
+        update.remoteHandle = CXHandle(type: .generic, value: friendlyHandleString)
         update.localizedCallerName = callerName
         update.hasVideo = false
         update.supportsHolding = true
@@ -93,7 +102,18 @@ class CallKitManager: NSObject {
         reverseCallMap[callId] = uuid
         outboundCallIds.insert(callId)
 
-        let callHandle = CXHandle(type: .generic, value: handle)
+        // The CXHandle is what iOS persists to the system Phone app's
+        // Recents log — NOT just what shows in the live Dynamic
+        // Island. Anything we pass here ends up in the user's call
+        // history forever, so it must be human-readable from the
+        // first call. `friendlyHandleValue` collapses UID-shaped
+        // strings into "Circles caller" so a raw Firebase UID never
+        // leaks into the system call log.
+        let initialHandleValue = friendlyHandleValue(
+            handle: handle,
+            callerName: callerName,
+        )
+        let callHandle = CXHandle(type: .generic, value: initialHandleValue)
         let startAction = CXStartCallAction(call: uuid, handle: callHandle)
         startAction.isVideo = false
         // CXStartCallAction.contactIdentifier is a hint CallKit uses
@@ -112,14 +132,14 @@ class CallKitManager: NSObject {
                 return
             }
             self.provider.reportOutgoingCall(with: uuid, startedConnectingAt: nil)
-            // Push the real caller name into CallKit so the Dynamic
-            // Island / Phone-app UI shows the contact's name instead
-            // of the URI handle. Without this, iOS displays whatever
-            // string we passed as the handle — usually a sip URI or
-            // a bare Firebase UID, which is meaningless to a human.
+            // Refresh the call's identity once the start action is
+            // accepted. localizedCallerName drives the Dynamic Island;
+            // remoteHandle drives Phone Recents. Both must be the
+            // friendly value — passing the URI through here is what
+            // historically leaked UIDs into the call log.
             if let callerName = callerName, !callerName.isEmpty {
                 let update = CXCallUpdate()
-                update.remoteHandle = callHandle
+                update.remoteHandle = CXHandle(type: .generic, value: callerName)
                 update.localizedCallerName = callerName
                 update.hasVideo = false
                 update.supportsHolding = true
@@ -129,18 +149,97 @@ class CallKitManager: NSObject {
         }
     }
 
-    /// Update the localized caller name on an already-reported CXCall.
-    /// Used by inbound calls whose SIP From URI was `sip:<uid>@<host>`
-    /// — CallKit's initial report has only the URI handle to show,
-    /// which surfaces as the raw Firebase UID in the Dynamic Island.
-    /// Once JS resolves the UID to a real name, this fires
-    /// reportCall(with:updated:) so CallKit re-renders with the
-    /// friendly name. No-op if the call is no longer tracked.
+    /// Update both the localized caller name AND the handle on an
+    /// already-reported CXCall. Used after JS resolves an inbound
+    /// call's uid to a real user — the initial reportIncomingCall
+    /// had only "Circles caller" / a phone number / etc. as the
+    /// handle (UIDs were stripped via `friendlyHandleValue`), and
+    /// the Dynamic Island / Recents UI shows that until we update.
+    ///
+    /// Updating remoteHandle (not just localizedCallerName) is
+    /// critical: iOS Phone's Recents log persists the handle, not
+    /// the name overlay. So a call that was answered + ended before
+    /// updateCallDisplay fired would still show the placeholder in
+    /// Recents unless we also write the resolved name to the handle.
     func updateCallDisplay(callId: String, callerName: String?) {
         guard let uuid = reverseCallMap[callId] else { return }
         let update = CXCallUpdate()
         update.localizedCallerName = callerName
+        if let name = callerName, !name.isEmpty {
+            update.remoteHandle = CXHandle(type: .generic, value: name)
+        }
         provider.reportCall(with: uuid, updated: update)
+    }
+
+    /// Produce a human-readable CXHandle value from a SIP URI / raw
+    /// handle. Hard rule: the result NEVER contains a Firebase UID or
+    /// PBX-internal `u_<hex>` identifier — those leak into iOS Phone's
+    /// Recents log otherwise (CXHandle.value is what shows there, not
+    /// localizedCallerName). Priority order:
+    ///   1. `callerName` — when the dialer already resolved the
+    ///      contact, use the human name directly.
+    ///   2. The user-part of the URI when it's PSTN-shaped
+    ///      (`+`-prefixed or all-digit) — keeps useful info like
+    ///      phone numbers visible.
+    ///   3. The user-part when it's clearly NOT a uid (not 20+
+    ///      alphanumerics, not `u_<hex>`).
+    ///   4. Fallback: `Circles caller` — generic but safe; never a uid.
+    private func friendlyHandleValue(handle: String, callerName: String?) -> String {
+        if let name = callerName?.trimmingCharacters(in: .whitespaces), !name.isEmpty {
+            return name
+        }
+        let userPart = extractUserPart(from: handle)
+        if looksLikePhoneNumber(userPart) {
+            return userPart
+        }
+        if !looksLikeIdentifier(userPart) {
+            return userPart
+        }
+        return "Circles caller"
+    }
+
+    /// Pull the user portion out of `sip:user@host`, `sips:user@host`,
+    /// or the bracketed `"Display" <sip:user@host>` form PJSIP gives
+    /// us. Returns the raw input when it isn't URI-shaped.
+    private func extractUserPart(from value: String) -> String {
+        if let angle = value.range(
+            of: #"<sips?:([^@>]+)"#,
+            options: .regularExpression
+        ) {
+            let matched = String(value[angle])
+            if let colon = matched.firstIndex(of: ":") {
+                return String(matched[matched.index(after: colon)...])
+            }
+        }
+        let stripped: String
+        if value.hasPrefix("sip:") {
+            stripped = String(value.dropFirst("sip:".count))
+        } else if value.hasPrefix("sips:") {
+            stripped = String(value.dropFirst("sips:".count))
+        } else {
+            stripped = value
+        }
+        if let at = stripped.firstIndex(of: "@") {
+            return String(stripped[..<at])
+        }
+        return stripped
+    }
+
+    /// Firebase UIDs (~28 char [A-Za-z0-9]) or `u_<hex>` PBX internal
+    /// IDs — anything that's a machine identifier rather than something
+    /// a human would recognize.
+    private func looksLikeIdentifier(_ s: String) -> Bool {
+        if s.range(of: #"^u_[A-Fa-f0-9]+$"#, options: .regularExpression) != nil {
+            return true
+        }
+        return s.range(of: #"^[A-Za-z0-9]{20,}$"#, options: .regularExpression) != nil
+    }
+
+    /// `+15551234567` or `5551234567` — keep these visible in Recents
+    /// since they're actually useful for the user (caller IDs from
+    /// the PSTN side of the SBC).
+    private func looksLikePhoneNumber(_ s: String) -> Bool {
+        return s.range(of: #"^\+?[0-9]{4,15}$"#, options: .regularExpression) != nil
     }
 
     func reportCallConnected(callId: String) {
