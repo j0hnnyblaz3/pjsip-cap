@@ -243,6 +243,24 @@ export interface PjsipPlugin {
     options?: RequestPermissionsOptions,
   ): Promise<CallPermissionStatus>;
 
+  /**
+   * Push a fresh display name to the OS-level call UI (CallKit on
+   * iOS) for an already-reported call. Inbound calls arrive with
+   * `sip:<uid>@<host>` as the From URI — no display name — so
+   * CallKit's initial report shows the bare UID handle. Once the
+   * JS layer resolves the UID to a real user via GraphQL, this
+   * pushes the friendly name back so the Dynamic Island /
+   * lock-screen UI re-renders with it.
+   *
+   * Safe to call repeatedly; only takes effect when CallKit still
+   * knows about the call. Web: no-op (the browser doesn't surface
+   * an OS-level call UI for sip.js calls).
+   */
+  updateCallDisplay(options: {
+    callId: string;
+    displayName: string | null;
+  }): Promise<void>;
+
   // Events
   addListener(
     event: 'callStateChanged',

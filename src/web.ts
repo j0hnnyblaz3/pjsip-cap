@@ -308,6 +308,16 @@ export class PjsipWeb extends WebPlugin implements PjsipPlugin {
     return { microphone: 'prompt', camera: 'prompt' };
   }
 
+  async updateCallDisplay(_options: {
+    callId: string;
+    displayName: string | null;
+  }): Promise<void> {
+    // No-op on web — the browser doesn't surface an OS-level call UI
+    // (no CallKit equivalent). The in-app overlays re-render
+    // themselves when the GraphQL lookup resolves; nothing here to
+    // synchronize with.
+  }
+
   async setAudioRoute(options: { route: AudioRoute }): Promise<void> {
     // Web has limited audio routing control — only speaker toggle via setSinkId
     const session = this.sessions.values().next().value;

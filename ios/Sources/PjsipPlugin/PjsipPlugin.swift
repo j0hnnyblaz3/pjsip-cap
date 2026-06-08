@@ -23,6 +23,7 @@ public class PjsipPlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "unregisterPush", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "checkPermissions", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "requestPermissions", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "updateCallDisplay", returnType: CAPPluginReturnPromise),
     ]
 
     private lazy var sipManager: SipManager = {
@@ -143,6 +144,28 @@ public class PjsipPlugin: CAPPlugin, CAPBridgedPlugin {
                 call.resolve()
             }
         }
+    }
+
+    /// Push a fresh display name to CallKit AFTER an inbound call has
+    /// already been reported. The PBX's `From:` header on inbound calls
+    /// is `sip:<uid>@<host>` with no display-name part, so CallKit's
+    /// initial reportNewIncomingCall has nothing but a UID handle to
+    /// show — the Dynamic Island ends up displaying the raw Firebase
+    /// UID, which is meaningless to a human.
+    ///
+    /// The JS layer resolves the UID to a real user via GraphQL (in
+    /// SipContext) and then calls this so CallKit's
+    /// CXCallUpdate.localizedCallerName picks up the real name. Safe
+    /// to call multiple times — only updates if the call is still
+    /// known to CallKit.
+    @objc func updateCallDisplay(_ call: CAPPluginCall) {
+        guard let callId = call.getString("callId") else {
+            call.reject("Missing required field: callId")
+            return
+        }
+        let displayName = call.getString("displayName")
+        callKitManager.updateCallDisplay(callId: callId, callerName: displayName)
+        call.resolve()
     }
 
     @objc func hangupCall(_ call: CAPPluginCall) {

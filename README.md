@@ -42,6 +42,7 @@ npx cap sync
 * [`unregisterPush()`](#unregisterpush)
 * [`checkPermissions()`](#checkpermissions)
 * [`requestPermissions(...)`](#requestpermissions)
+* [`updateCallDisplay(...)`](#updatecalldisplay)
 * [`addListener('callStateChanged', ...)`](#addlistenercallstatechanged-)
 * [`addListener('registrationStateChanged', ...)`](#addlistenerregistrationstatechanged-)
 * [`addListener('incomingCall', ...)`](#addlistenerincomingcall-)
@@ -277,6 +278,31 @@ at media-acquire time, not via a separate request API.
 | **`options`** | <code><a href="#requestpermissionsoptions">RequestPermissionsOptions</a></code> |
 
 **Returns:** <code>Promise&lt;<a href="#callpermissionstatus">CallPermissionStatus</a>&gt;</code>
+
+--------------------
+
+
+### updateCallDisplay(...)
+
+```typescript
+updateCallDisplay(options: { callId: string; displayName: string | null; }) => Promise<void>
+```
+
+Push a fresh display name to the OS-level call UI (CallKit on
+iOS) for an already-reported call. Inbound calls arrive with
+`sip:&lt;uid&gt;@&lt;host&gt;` as the From URI — no display name — so
+CallKit's initial report shows the bare UID handle. Once the
+JS layer resolves the UID to a real user via GraphQL, this
+pushes the friendly name back so the Dynamic Island /
+lock-screen UI re-renders with it.
+
+Safe to call repeatedly; only takes effect when CallKit still
+knows about the call. Web: no-op (the browser doesn't surface
+an OS-level call UI for sip.js calls).
+
+| Param         | Type                                                          |
+| ------------- | ------------------------------------------------------------- |
+| **`options`** | <code>{ callId: string; displayName: string \| null; }</code> |
 
 --------------------
 

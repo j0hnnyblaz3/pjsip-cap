@@ -129,6 +129,20 @@ class CallKitManager: NSObject {
         }
     }
 
+    /// Update the localized caller name on an already-reported CXCall.
+    /// Used by inbound calls whose SIP From URI was `sip:<uid>@<host>`
+    /// — CallKit's initial report has only the URI handle to show,
+    /// which surfaces as the raw Firebase UID in the Dynamic Island.
+    /// Once JS resolves the UID to a real name, this fires
+    /// reportCall(with:updated:) so CallKit re-renders with the
+    /// friendly name. No-op if the call is no longer tracked.
+    func updateCallDisplay(callId: String, callerName: String?) {
+        guard let uuid = reverseCallMap[callId] else { return }
+        let update = CXCallUpdate()
+        update.localizedCallerName = callerName
+        provider.reportCall(with: uuid, updated: update)
+    }
+
     func reportCallConnected(callId: String) {
         guard let uuid = reverseCallMap[callId] else { return }
         // Only outbound calls need the explicit connectedAt report —
