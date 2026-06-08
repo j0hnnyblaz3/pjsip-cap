@@ -398,10 +398,33 @@ a type cast.
 
 #### RegistrationState
 
-<code>'unregistered' | 'registering' | 'registered' | 'unregistering' | 'failed'</code>
+Registration state values both backends produce.
+
+Note: there's no `unregistering` — earlier drafts had one, but
+neither the iOS PJSIP backend nor the web (sip.js) backend
+surface that transient state. `unregister` simply flips from
+`registered` to `unregistered` once the SBC ACKs.
+
+<code>'unregistered' | 'registering' | 'registered' | 'failed'</code>
 
 
 #### CallState
+
+Call lifecycle states.
+
+Cross-platform notes:
+  • `calling` — outbound INVITE sent, no provisional response yet.
+  • `early` — outbound 183 Session Progress received (e.g. ringback
+    from the SBC). iOS distinguishes this; web's sip.js folds it
+    into `connecting`, so web never emits `early`. UI treats
+    `calling` and `early` identically ("Calling…").
+  • `connecting` — 200 OK received, ACK in flight (web) or
+    PJSIP_INV_STATE_CONNECTING transient (iOS).
+  • `confirmed` — ACK done, media flowing.
+  • `held` — synthesized: iOS derives from PJSIP media_status
+    (LOCAL_HOLD or REMOTE_HOLD); web currently only emits this on
+    local hold — see [[project_future_work]] for remote-hold
+    synthesis on web.
 
 <code>'calling' | 'incoming' | 'early' | 'connecting' | 'confirmed' | 'disconnected' | 'held'</code>
 

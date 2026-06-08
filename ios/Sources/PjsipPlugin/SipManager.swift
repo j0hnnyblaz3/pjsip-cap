@@ -341,20 +341,13 @@ class SipManager: NSObject {
         while pendingCallUuidsOrder.count > Self.MAX_PENDING_PUSHES {
             let evicted = pendingCallUuidsOrder.removeFirst()
             pendingCallUuids.remove(evicted)
-            pendingAnswerCallUuids.remove(evicted)
-            cancelAnswerTimer(callUuid: evicted)
-            // If the evicted call had a held CallKit answer
-            // completion, fail it cleanly so CallKit dismisses
-            // instead of waiting forever.
-            if let completion = pendingAnswerCompletions.removeValue(forKey: evicted) {
-                DispatchQueue.main.async {
-                    completion(NSError(
-                        domain: "PjsipPlugin",
-                        code: -3,
-                        userInfo: [NSLocalizedDescriptionKey: "evicted by push-storm cap"]
-                    ))
-                }
-            }
+            // Route through failPendingAnswer rather than removing
+            // the completion inline — keeps the answer-timer cleanup,
+            // pendingAnswerCallUuids removal, and the diagnostic dump
+            // (regState / activeCalls / set sizes) all in one place
+            // so an evicted-with-held-completion case still shows up
+            // in the logs the same way a graceful expiry does.
+            failPendingAnswer(callUuid: evicted, reason: "evicted by push-storm cap")
             print("[SipManager] addPendingCallUuid: evicted \(evicted) (cap=\(Self.MAX_PENDING_PUSHES) reached)")
         }
     }
