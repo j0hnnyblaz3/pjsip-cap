@@ -39,16 +39,38 @@ class CallKitManager: NSObject {
     // MARK: - Reporting calls to CallKit
 
     func reportIncomingCall(callId: String, handle: String, callerName: String?) {
-        let uuid = UUID()
-        callMap[uuid] = callId
-        reverseCallMap[callId] = uuid
-
+        // Dedup by callId. Both the VoIP push path and PJSIP's
+        // on_incoming_call (after the INVITE lands) end up calling
+        // this with the same callId — the push uses call_uuid, the
+        // INVITE bridges via X-Redyrect-Call-UUID, they're identical.
+        // Without this guard, the second call creates a brand-new
+        // CXCall with a fresh UUID, leaving the first one orphaned:
+        // CallKit then shows a "still ringing" Dynamic Island pill
+        // for the orphan even after the user answered the real one.
+        // reportCallEnded() only knows about the second (latest)
+        // UUID since reverseCallMap overwrote, so the orphan never
+        // gets cleaned up either — the user has to force-quit.
+        //
+        // The right thing here is to update the EXISTING CXCall with
+        // whatever fresher caller info the second report carries.
+        // CXProvider.reportCall(with:updated:) does that without
+        // creating a new entry.
         let update = CXCallUpdate()
         update.remoteHandle = CXHandle(type: .generic, value: handle)
         update.localizedCallerName = callerName
         update.hasVideo = false
         update.supportsHolding = true
         update.supportsDTMF = true
+
+        if let existingUuid = reverseCallMap[callId] {
+            print("[CallKitManager] reportIncomingCall: \(callId) already known — updating CXCall in place")
+            provider.reportCall(with: existingUuid, updated: update)
+            return
+        }
+
+        let uuid = UUID()
+        callMap[uuid] = callId
+        reverseCallMap[callId] = uuid
 
         provider.reportNewIncomingCall(with: uuid, update: update) { error in
             if let error = error {
