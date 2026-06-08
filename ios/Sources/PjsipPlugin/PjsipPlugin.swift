@@ -107,9 +107,20 @@ public class PjsipPlugin: CAPPlugin, CAPBridgedPlugin {
             return
         }
 
+        // Optional displayName from the JS dialer — when set, CallKit
+        // shows this in the Dynamic Island / iOS Phone-app UI instead
+        // of the raw sip URI / Firebase UID. Without it the user sees
+        // strings like `y5ft3JFWtHPTewC8aiPwBEiQGpl1` as the call's
+        // identity, which is nonsense to a human.
+        let displayName = call.getString("displayName")
+
         let callId = sipManager.makeCall(uri: uri)
         if let callId = callId {
-            callKitManager.reportOutgoingCall(callId: callId, handle: uri)
+            callKitManager.reportOutgoingCall(
+                callId: callId,
+                handle: uri,
+                callerName: displayName
+            )
             call.resolve(["callId": callId])
         } else {
             call.reject("Failed to make call")

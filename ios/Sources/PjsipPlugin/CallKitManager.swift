@@ -81,7 +81,7 @@ class CallKitManager: NSObject {
         }
     }
 
-    func reportOutgoingCall(callId: String, handle: String) {
+    func reportOutgoingCall(callId: String, handle: String, callerName: String? = nil) {
         let uuid = UUID()
         callMap[uuid] = callId
         reverseCallMap[callId] = uuid
@@ -89,13 +89,35 @@ class CallKitManager: NSObject {
         let callHandle = CXHandle(type: .generic, value: handle)
         let startAction = CXStartCallAction(call: uuid, handle: callHandle)
         startAction.isVideo = false
+        // CXStartCallAction.contactIdentifier is a hint CallKit uses
+        // when constructing the call's identity. It's a soft signal —
+        // the authoritative label comes from CXCallUpdate (set below
+        // once the action completes).
+        if let callerName = callerName {
+            startAction.contactIdentifier = callerName
+        }
 
         let transaction = CXTransaction(action: startAction)
-        callController.request(transaction) { error in
+        callController.request(transaction) { [weak self] error in
+            guard let self = self else { return }
             if let error = error {
                 print("[CallKitManager] Start call error: \(error)")
-            } else {
-                self.provider.reportOutgoingCall(with: uuid, startedConnectingAt: nil)
+                return
+            }
+            self.provider.reportOutgoingCall(with: uuid, startedConnectingAt: nil)
+            // Push the real caller name into CallKit so the Dynamic
+            // Island / Phone-app UI shows the contact's name instead
+            // of the URI handle. Without this, iOS displays whatever
+            // string we passed as the handle — usually a sip URI or
+            // a bare Firebase UID, which is meaningless to a human.
+            if let callerName = callerName, !callerName.isEmpty {
+                let update = CXCallUpdate()
+                update.remoteHandle = callHandle
+                update.localizedCallerName = callerName
+                update.hasVideo = false
+                update.supportsHolding = true
+                update.supportsDTMF = true
+                self.provider.reportCall(with: uuid, updated: update)
             }
         }
     }

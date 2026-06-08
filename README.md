@@ -346,11 +346,12 @@ in-flight calls instead of orphaning them.
 
 #### IncomingCallEvent
 
-| Prop             | Type                |
-| ---------------- | ------------------- |
-| **`callId`**     | <code>string</code> |
-| **`remoteUri`**  | <code>string</code> |
-| **`callerName`** | <code>string</code> |
+| Prop             | Type                | Description                                                                                                                                                                                                                                                                     |
+| ---------------- | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **`callId`**     | <code>string</code> |                                                                                                                                                                                                                                                                                 |
+| **`remoteUri`**  | <code>string</code> |                                                                                                                                                                                                                                                                                 |
+| **`callerName`** | <code>string</code> |                                                                                                                                                                                                                                                                                 |
+| **`callUuid`**   | <code>string</code> | The PBX-side call identifier, lifted from the INVITE's `X-Redyrect-Call-UUID` header when present. Lets the client address this specific call via REST (decline/hangup) and correlate with the FCM push that announced it. Optional — older PBX versions don't emit the header. |
 
 
 #### PushTokenEvent
