@@ -1049,10 +1049,34 @@ class SipManager: NSObject {
     func handleCallMediaState(pjCallId: pjsua_call_id) {
         guard let info = getCallInfo(pjCallId) else { return }
 
-        // Connect call audio to the sound device when media is active
-        if info.media_status == PJSUA_CALL_MEDIA_ACTIVE {
+        // The conf bridge connects call audio ↔ sound device (slot 0).
+        // We must:
+        //   - ACTIVE → wire both directions so audio flows.
+        //   - LOCAL_HOLD / REMOTE_HOLD → tear those connections down
+        //     so the user doesn't hear silent audio from a held call,
+        //     AND so a SECOND active call (call-waiting scenario) can
+        //     own the speaker/mic without mixing with the held one.
+        //   - NONE / ERROR → also disconnect; nothing to play.
+        // Without the disconnect branches, two concurrent calls would
+        // both stay wired to slot 0 and audio would be mixed or
+        // chaotic when the user swapped.
+        switch info.media_status {
+        case PJSUA_CALL_MEDIA_ACTIVE:
             pjsua_conf_connect(info.conf_slot, 0)  // call -> speaker
-            pjsua_conf_connect(0, info.conf_slot)  // mic -> call
+            pjsua_conf_connect(0, info.conf_slot)  // mic  -> call
+            print("[SipManager] handleCallMediaState: pjCallId=\(pjCallId) ACTIVE — bridges connected (slot=\(info.conf_slot))")
+        case PJSUA_CALL_MEDIA_LOCAL_HOLD,
+             PJSUA_CALL_MEDIA_REMOTE_HOLD:
+            pjsua_conf_disconnect(info.conf_slot, 0)
+            pjsua_conf_disconnect(0, info.conf_slot)
+            print("[SipManager] handleCallMediaState: pjCallId=\(pjCallId) HOLD — bridges disconnected (slot=\(info.conf_slot))")
+        case PJSUA_CALL_MEDIA_NONE,
+             PJSUA_CALL_MEDIA_ERROR:
+            pjsua_conf_disconnect(info.conf_slot, 0)
+            pjsua_conf_disconnect(0, info.conf_slot)
+            print("[SipManager] handleCallMediaState: pjCallId=\(pjCallId) NONE/ERROR — bridges disconnected")
+        default:
+            break
         }
     }
 
