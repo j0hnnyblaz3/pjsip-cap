@@ -193,14 +193,25 @@ class SipManager: NSObject {
     /// the user instead of a stuck call entry with no audio.
     private var pendingAnswerCompletions: [String: (Error?) -> Void] = [:]
 
-    /// 5-second budget per tapped-Accept-without-INVITE. Short enough
-    /// that the user gets prompt feedback if the call won't connect;
-    /// long enough that a normal post-push REGISTER + bridge round
-    /// trip completes well inside it. Not to be confused with iOS's
-    /// own PushKit grace window (~30s) — that one handles the no-tap
-    /// case at the OS level and we don't override it.
+    /// Budget per tapped-Accept-without-INVITE. The push arrived but
+    /// the SIP INVITE hasn't yet; we hold the CallKit completion until
+    /// either the INVITE lands (success) or this window expires (fail
+    /// the CXAction so CallKit shows "Call Failed" instead of a stuck
+    /// entry with no audio).
+    ///
+    /// Set to 10s because the realistic worst case is:
+    ///   push wakes app → forceRegister → SBC processes REGISTER
+    ///   200 OK → routing engine notices new contact → re-attempts
+    ///   call routing → INVITE arrives.
+    /// That chain commonly takes 3-6s on a contended SBC; a 5s
+    /// budget was timing out before the INVITE even reached us in
+    /// real-world testing. 10s still gives prompt feedback if the
+    /// call genuinely can't connect, but no longer false-fails the
+    /// push-wake path. Not to be confused with iOS's own PushKit
+    /// grace window (~30s) — that one handles the no-tap case at the
+    /// OS level and we don't override it.
     private var pendingAnswerTimers: [String: DispatchWorkItem] = [:]
-    private static let ANSWER_WAIT_GRACE_SEC: TimeInterval = 5.0
+    private static let ANSWER_WAIT_GRACE_SEC: TimeInterval = 10.0
 
     /// Insertion-order tracking for pendingCallUuids so we can evict
     /// the oldest when a PBX storm tries to balloon the set. Parallel
