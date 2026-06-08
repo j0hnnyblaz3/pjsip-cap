@@ -148,8 +148,14 @@ public class PjsipPlugin: CAPPlugin, CAPBridgedPlugin {
             return
         }
 
+        // Don't optimistically call reportCallEnded here. PJSIP will
+        // emit a "disconnected" state change once the BYE/CANCEL is
+        // acknowledged (or after the local-force-disconnected fallback
+        // path in SipManager.hangupCall), and onCallStateChanged owns
+        // the single CallKit-end report. Doing it both here AND on
+        // disconnected leaves a stale entry in CallKit's recents log
+        // on the second invocation.
         sipManager.hangupCall(callId: callId)
-        callKitManager.reportCallEnded(callId: callId)
         call.resolve()
     }
 
@@ -239,17 +245,41 @@ extension PjsipPlugin: SipManagerDelegate {
         }
         notifyListeners("callStateChanged", data: data)
 
-        if state == "disconnected" {
+        // Drive CallKit's lifecycle from the authoritative SIP state.
+        // Two transitions matter here:
+        //   confirmed   → reportCallConnected (CXCall flips from
+        //                 "Connecting…" to live duration timer)
+        //   disconnected → reportCallEnded (clears the Dynamic Island
+        //                 entry, lets the OS finalize the call log)
+        // Note: we DON'T also fire reportCallEnded from hangupCall —
+        // hangupCall just initiates teardown; pjsua will follow up
+        // with a "disconnected" state change and we report ended once
+        // here. Double-reporting leaves a stale call in CallKit's call
+        // log on the second invocation.
+        switch state {
+        case "confirmed":
+            callKitManager.reportCallConnected(callId: callId)
+        case "disconnected":
             callKitManager.reportCallEnded(callId: callId)
+        default:
+            break
         }
     }
 
-    func onIncomingCall(callId: String, remoteUri: String, callerName: String?) {
+    func onIncomingCall(callId: String, remoteUri: String, callerName: String?, callUuid: String?) {
         callKitManager.reportIncomingCall(callId: callId, handle: remoteUri, callerName: callerName)
 
         var data: [String: Any] = ["callId": callId, "remoteUri": remoteUri]
         if let callerName = callerName {
             data["callerName"] = callerName
+        }
+        // Surface the PBX-side X-Redyrect-Call-UUID header to JS. When
+        // the INVITE carries this header (it always should from a
+        // Redyrect SBC), callId == callUuid — but we emit both fields
+        // anyway so the JS layer doesn't have to know about that
+        // identity-conflation rule. Web sip.js layer does the same.
+        if let callUuid = callUuid {
+            data["callUuid"] = callUuid
         }
         notifyListeners("incomingCall", data: data)
     }

@@ -52,7 +52,15 @@ struct SipConfig {
 protocol SipManagerDelegate: AnyObject {
     func onRegistrationStateChanged(state: String, reason: String?)
     func onCallStateChanged(callId: String, state: String, remoteUri: String?)
-    func onIncomingCall(callId: String, remoteUri: String, callerName: String?)
+    /// Fires for inbound calls. `callUuid` is the value of the INVITE's
+    /// `X-Redyrect-Call-UUID` header when present — this is the
+    /// PBX-side identifier (FreeSWITCH channel UUID) the same as the
+    /// VoIP push `call_uuid`. Nil when the INVITE came in without the
+    /// header (foreground inbound from a non-Redyrect upstream). The
+    /// plugin forwards it to JS so the client can call REST-side
+    /// decline/cancel against the PBX without depending on the
+    /// synthetic plugin callId.
+    func onIncomingCall(callId: String, remoteUri: String, callerName: String?, callUuid: String?)
 }
 
 // MARK: - PJSIP Thread
@@ -979,7 +987,15 @@ class SipManager: NSObject {
     func setAudioRoute(route: String) {
         let session = AVAudioSession.sharedInstance()
         do {
-            try session.setCategory(.playAndRecord, mode: .voiceChat)
+            // Don't re-set the category here. CallKit (via
+            // CallKitManager.configureAudioSession) already chose
+            // (.playAndRecord, .voiceChat) with [.allowBluetooth,
+            // .allowBluetoothA2DP, .duckOthers]. If we re-set without
+            // carrying the same options, the speaker toggle strips
+            // Bluetooth support mid-call — user taps Speaker and their
+            // AirPods get dropped. The route override below is what
+            // actually switches the speaker/earpiece/BT path; it
+            // doesn't need a category change first.
             switch route {
             case "speaker":
                 try session.overrideOutputAudioPort(.speaker)
@@ -1098,7 +1114,12 @@ class SipManager: NSObject {
         }
 
         DispatchQueue.main.async { [weak self] in
-            self?.delegate?.onIncomingCall(callId: pluginCallId, remoteUri: remoteUri, callerName: callerName)
+            self?.delegate?.onIncomingCall(
+                callId: pluginCallId,
+                remoteUri: remoteUri,
+                callerName: callerName,
+                callUuid: headerUuid
+            )
         }
     }
 

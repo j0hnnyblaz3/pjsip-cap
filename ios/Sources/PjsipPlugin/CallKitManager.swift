@@ -25,6 +25,12 @@ class CallKitManager: NSObject {
     /// Maps CXCall UUIDs to plugin callIds
     private var callMap: [UUID: String] = [:]
     private var reverseCallMap: [String: UUID] = [:]
+    /// Tracks call direction so reportCallConnected can pick the right
+    /// CallKit API. Inbound calls flip to "connected" via the answer
+    /// action's fulfill(); outbound calls need an explicit
+    /// reportOutgoingCall(connectedAt:). Calling the outbound API on
+    /// an inbound call confuses CallKit's call-log state.
+    private var outboundCallIds: Set<String> = []
 
     override init() {
         let config = CXProviderConfiguration()
@@ -85,6 +91,7 @@ class CallKitManager: NSObject {
         let uuid = UUID()
         callMap[uuid] = callId
         reverseCallMap[callId] = uuid
+        outboundCallIds.insert(callId)
 
         let callHandle = CXHandle(type: .generic, value: handle)
         let startAction = CXStartCallAction(call: uuid, handle: callHandle)
@@ -124,6 +131,12 @@ class CallKitManager: NSObject {
 
     func reportCallConnected(callId: String) {
         guard let uuid = reverseCallMap[callId] else { return }
+        // Only outbound calls need the explicit connectedAt report —
+        // inbound calls flip from ringing to connected when the
+        // CXAnswerCallAction is fulfilled. Calling
+        // reportOutgoingCall(connectedAt:) on an inbound entry
+        // would re-classify the call type and confuse the call log.
+        guard outboundCallIds.contains(callId) else { return }
         provider.reportOutgoingCall(with: uuid, connectedAt: nil)
     }
 
@@ -132,6 +145,7 @@ class CallKitManager: NSObject {
         provider.reportCall(with: uuid, endedAt: nil, reason: .remoteEnded)
         callMap.removeValue(forKey: uuid)
         reverseCallMap.removeValue(forKey: callId)
+        outboundCallIds.remove(callId)
     }
 }
 

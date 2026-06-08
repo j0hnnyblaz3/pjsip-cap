@@ -24,6 +24,28 @@ export type SipTransport = 'udp' | 'tcp' | 'tls' | 'wss';
 
 export type PushPlatform = 'apns' | 'fcm' | 'web';
 
+/**
+ * APNs environment for the push token. Sandbox is Xcode debug builds;
+ * production is TestFlight / App Store. The PBX uses this to pick the
+ * correct APNs endpoint per-token so a debug install and a TestFlight
+ * install of the same app can coexist against the same global config.
+ */
+export type PushEnvironment = 'sandbox' | 'production';
+
+/**
+ * SRTP enforcement policy for outbound INVITEs:
+ * - `disabled`: plain RTP, no SAVP offer
+ * - `optional`: offer RTP/AVP with embedded crypto attribute (hybrid)
+ * - `mandatory`: offer RTP/SAVP profile cleanly (recommended for SBCs
+ *   like FreeSWITCH behind dSIPRouter which reject the OPTIONAL hybrid)
+ *
+ * Currently consumed by the iOS native backend only; web (sip.js) leaves
+ * SRTP policy to the SDP-handler factory and ignores this field. Declared
+ * here so the JS layer can forward the admin VoIP-config override without
+ * a type cast.
+ */
+export type SrtpPolicy = 'disabled' | 'optional' | 'mandatory';
+
 // --- Config ---
 
 export interface SipAccountConfig {
@@ -34,7 +56,21 @@ export interface SipAccountConfig {
   domain: string;
   transport?: SipTransport;
   proxy?: string;          // outbound proxy / SBC URI (e.g. "sip:sbc.example.com:5060;lr")
+  /**
+   * Opaque push token forwarded to the SBC in the REGISTER's
+   * `pn-tok` / contact params so the server can wake the app via VoIP
+   * push when an INVITE arrives. Currently informational — the iOS
+   * backend acquires its own token via PushKit and the SBC pairs by
+   * extension, but the field is forwarded for SBCs that key on the
+   * registered token instead.
+   */
   pushToken?: string;
+  /**
+   * SRTP enforcement policy. Defaults to `mandatory` on iOS (clean
+   * RTP/SAVP profile, matches FreeSWITCH/dSIPRouter expectations).
+   * Ignored on web.
+   */
+  srtpPolicy?: SrtpPolicy;
 }
 
 // --- Events ---
@@ -65,6 +101,13 @@ export interface IncomingCallEvent {
 export interface PushTokenEvent {
   token: string;
   platform: PushPlatform;
+  /**
+   * APNs environment (`sandbox` or `production`). Emitted on iOS only —
+   * web/FCM don't have the same dual-endpoint setup. Lets the PBX route
+   * pushes to the right APNs server for THIS specific token so debug
+   * and TestFlight installs of the same app can coexist.
+   */
+  environment?: PushEnvironment;
 }
 
 // --- Recovery ---
@@ -91,7 +134,16 @@ export interface PjsipPlugin {
   getRegistrationState(): Promise<{ state: RegistrationState }>;
 
   // Calls
-  makeCall(options: { uri: string }): Promise<{ callId: string }>;
+  /**
+   * Place an outbound call.
+   *
+   * `displayName` is optional and, on iOS, is fed into CallKit's
+   * `CXCallUpdate.localizedCallerName` so the Dynamic Island /
+   * Phone-app UI shows the contact's display name instead of the
+   * raw SIP URI / Firebase UID. Web ignores it (UI surfaces the
+   * dialer-known name itself).
+   */
+  makeCall(options: { uri: string; displayName?: string }): Promise<{ callId: string }>;
   answerCall(options: { callId: string }): Promise<void>;
   hangupCall(options: { callId: string }): Promise<void>;
 

@@ -88,12 +88,20 @@ getRegistrationState() => Promise<{ state: RegistrationState; }>
 ### makeCall(...)
 
 ```typescript
-makeCall(options: { uri: string; }) => Promise<{ callId: string; }>
+makeCall(options: { uri: string; displayName?: string; }) => Promise<{ callId: string; }>
 ```
 
-| Param         | Type                          |
-| ------------- | ----------------------------- |
-| **`options`** | <code>{ uri: string; }</code> |
+Place an outbound call.
+
+`displayName` is optional and, on iOS, is fed into CallKit's
+`CXCallUpdate.localizedCallerName` so the Dynamic Island /
+Phone-app UI shows the contact's display name instead of the
+raw SIP URI / Firebase UID. Web ignores it (UI surfaces the
+dialer-known name itself).
+
+| Param         | Type                                                |
+| ------------- | --------------------------------------------------- |
+| **`options`** | <code>{ uri: string; displayName?: string; }</code> |
 
 **Returns:** <code>Promise&lt;{ callId: string; }&gt;</code>
 
@@ -293,16 +301,17 @@ addListener(event: 'pushTokenUpdated', listener: (data: PushTokenEvent) => void)
 
 #### SipAccountConfig
 
-| Prop            | Type                                                  |
-| --------------- | ----------------------------------------------------- |
-| **`server`**    | <code>string</code>                                   |
-| **`port`**      | <code>number</code>                                   |
-| **`username`**  | <code>string</code>                                   |
-| **`password`**  | <code>string</code>                                   |
-| **`domain`**    | <code>string</code>                                   |
-| **`transport`** | <code><a href="#siptransport">SipTransport</a></code> |
-| **`proxy`**     | <code>string</code>                                   |
-| **`pushToken`** | <code>string</code>                                   |
+| Prop             | Type                                                  | Description                                                                                                                                                                                                                                                                                                                                        |
+| ---------------- | ----------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **`server`**     | <code>string</code>                                   |                                                                                                                                                                                                                                                                                                                                                    |
+| **`port`**       | <code>number</code>                                   |                                                                                                                                                                                                                                                                                                                                                    |
+| **`username`**   | <code>string</code>                                   |                                                                                                                                                                                                                                                                                                                                                    |
+| **`password`**   | <code>string</code>                                   |                                                                                                                                                                                                                                                                                                                                                    |
+| **`domain`**     | <code>string</code>                                   |                                                                                                                                                                                                                                                                                                                                                    |
+| **`transport`**  | <code><a href="#siptransport">SipTransport</a></code> |                                                                                                                                                                                                                                                                                                                                                    |
+| **`proxy`**      | <code>string</code>                                   |                                                                                                                                                                                                                                                                                                                                                    |
+| **`pushToken`**  | <code>string</code>                                   | Opaque push token forwarded to the SBC in the REGISTER's `pn-tok` / contact params so the server can wake the app via VoIP push when an INVITE arrives. Currently informational — the iOS backend acquires its own token via PushKit and the SBC pairs by extension, but the field is forwarded for SBCs that key on the registered token instead. |
+| **`srtpPolicy`** | <code><a href="#srtppolicy">SrtpPolicy</a></code>     | SRTP enforcement policy. Defaults to `mandatory` on iOS (clean RTP/SAVP profile, matches FreeSWITCH/dSIPRouter expectations). Ignored on web.                                                                                                                                                                                                      |
 
 
 #### ActiveCall
@@ -356,10 +365,11 @@ in-flight calls instead of orphaning them.
 
 #### PushTokenEvent
 
-| Prop           | Type                                                  |
-| -------------- | ----------------------------------------------------- |
-| **`token`**    | <code>string</code>                                   |
-| **`platform`** | <code><a href="#pushplatform">PushPlatform</a></code> |
+| Prop              | Type                                                        | Description                                                                                                                                                                                                                                                   |
+| ----------------- | ----------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **`token`**       | <code>string</code>                                         |                                                                                                                                                                                                                                                               |
+| **`platform`**    | <code><a href="#pushplatform">PushPlatform</a></code>       |                                                                                                                                                                                                                                                               |
+| **`environment`** | <code><a href="#pushenvironment">PushEnvironment</a></code> | APNs environment (`sandbox` or `production`). Emitted on iOS only — web/FCM don't have the same dual-endpoint setup. Lets the PBX route pushes to the right APNs server for THIS specific token so debug and TestFlight installs of the same app can coexist. |
 
 
 ### Type Aliases
@@ -368,6 +378,22 @@ in-flight calls instead of orphaning them.
 #### SipTransport
 
 <code>'udp' | 'tcp' | 'tls' | 'wss'</code>
+
+
+#### SrtpPolicy
+
+SRTP enforcement policy for outbound INVITEs:
+- `disabled`: plain RTP, no SAVP offer
+- `optional`: offer RTP/AVP with embedded crypto attribute (hybrid)
+- `mandatory`: offer RTP/SAVP profile cleanly (recommended for SBCs
+  like FreeSWITCH behind dSIPRouter which reject the OPTIONAL hybrid)
+
+Currently consumed by the iOS native backend only; web (sip.js) leaves
+SRTP policy to the SDP-handler factory and ignores this field. Declared
+here so the JS layer can forward the admin VoIP-config override without
+a type cast.
+
+<code>'disabled' | 'optional' | 'mandatory'</code>
 
 
 #### RegistrationState
@@ -388,5 +414,15 @@ in-flight calls instead of orphaning them.
 #### PushPlatform
 
 <code>'apns' | 'fcm' | 'web'</code>
+
+
+#### PushEnvironment
+
+APNs environment for the push token. Sandbox is Xcode debug builds;
+production is TestFlight / App Store. The PBX uses this to pick the
+correct APNs endpoint per-token so a debug install and a TestFlight
+install of the same app can coexist against the same global config.
+
+<code>'sandbox' | 'production'</code>
 
 </docgen-api>
