@@ -160,22 +160,25 @@ extension CallKitManager: CXProviderDelegate {
     }
 
     func provider(_ provider: CXProvider, didActivate audioSession: AVAudioSession) {
-        // CallKit just activated AVAudioSession for the call. PJSIP's
-        // coreaudio backend is now able to capture from the mic and
-        // play through the speaker — the actual mic↔speaker↔SIP
-        // routing is wired by `handleCallMediaState` when the call's
-        // media transitions to PJSUA_CALL_MEDIA_ACTIVE (i.e. after
-        // 200 OK / ACK exchange). Nothing else to do here except log
-        // — but the log is useful, because "missing this event" is
-        // the first thing to check when calls have no audio.
-        print("[CallKitManager] AVAudioSession activated by CallKit")
+        // CallKit has activated AVAudioSession — only now is it safe
+        // for PJSIP to open the audio device. The PJSIP/iOS recipe is:
+        //  1. At pjsua_start, call pjsua_set_no_snd_dev (detach).
+        //  2. On CallKit didActivate, call pjsua_set_snd_dev (attach).
+        //  3. On CallKit didDeactivate, call pjsua_set_no_snd_dev.
+        // Without (2), PJSIP's AURemoteIO unit fails to enable with
+        // status 561017449 on every sample rate because the session
+        // isn't active when it tries to open the device. Calls reach
+        // "confirmed" but no audio flows.
+        print("[CallKitManager] AVAudioSession activated by CallKit — attaching PJSIP sound device")
+        SipManager.shared.startAudioDevice()
     }
 
     func provider(_ provider: CXProvider, didDeactivate audioSession: AVAudioSession) {
-        // CallKit will deactivate when all calls end. PJSIP's audio
-        // device stops polling automatically when the session goes
-        // inactive (coreaudio_dev follows AVAudioSession state).
-        print("[CallKitManager] AVAudioSession deactivated by CallKit")
+        // Detach PJSIP from the device so it doesn't keep AURemoteIO
+        // alive when CallKit has released the session. Signaling
+        // (REGISTER, INVITE) continues independently.
+        print("[CallKitManager] AVAudioSession deactivated by CallKit — detaching PJSIP sound device")
+        SipManager.shared.stopAudioDevice()
     }
 
     // MARK: - Audio Session

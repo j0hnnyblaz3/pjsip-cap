@@ -537,6 +537,23 @@ class SipManager: NSObject {
         }
         pjsuaStarted = true
 
+        // Detach from the sound device immediately. We let CallKit's
+        // didActivate handler attach it when AVAudioSession is ready.
+        // Without this, PJSIP grabs the audio unit at pjsua_start time
+        // — before AVAudioSession is active — and AURemoteIO fails to
+        // initialize (561017449 across every sample rate it tries).
+        // PJSIP then has a half-initialized audio path even after
+        // CallKit activates the session, and calls connect with no
+        // working media. See `startAudioDevice` / `stopAudioDevice`
+        // below for the CallKit-driven lifecycle.
+        //
+        // pjsua_set_no_snd_dev returns a pjmedia_port* (a "null"
+        // sound device port the conf bridge can connect to) rather
+        // than a status code — discarding it is fine; the side
+        // effect we want is detaching from coreaudio.
+        _ = pjsua_set_no_snd_dev()
+        print("[SipManager] startPjsua: detached sound device")
+
         // After pjsua_start, the codec subsystem is initialized and we
         // can enumerate + reprioritize. Without this, PJSIP offers its
         // full compiled-in codec list (PCMU, PCMA, G722, iLBC, GSM,
@@ -881,6 +898,47 @@ class SipManager: NSObject {
         pjThread.performAsync {
             var dest = pj_str_from_swift(target)
             pjsua_call_xfer(pjCallId, &dest, nil)
+        }
+    }
+
+    /// Attach PJSIP to the actual iOS audio device. Called from
+    /// CallKitManager.provider(didActivate:) — only after CallKit
+    /// has activated AVAudioSession is the device able to open
+    /// successfully (AURemoteIO unit needs an active session). The
+    /// pjsua_call_get_info / conf_connect plumbing that
+    /// handleCallMediaState set up earlier will start pushing audio
+    /// the instant the device opens.
+    func startAudioDevice() {
+        pjThread.performAsync { [weak self] in
+            guard let self = self, self.pjsuaStarted else { return }
+            // PJMEDIA_AUD_DEFAULT_CAPTURE_DEV / PJMEDIA_AUD_DEFAULT_PLAYBACK_DEV
+            // are imported as Int32 directly (not enum types), so we
+            // pass them through without `.rawValue`.
+            let status = pjsua_set_snd_dev(
+                PJMEDIA_AUD_DEFAULT_CAPTURE_DEV,
+                PJMEDIA_AUD_DEFAULT_PLAYBACK_DEV
+            )
+            if status == Int32(PJ_SUCCESS.rawValue) {
+                print("[SipManager] startAudioDevice: attached")
+            } else {
+                print("[SipManager] startAudioDevice failed status=\(status)")
+            }
+        }
+    }
+
+    /// Detach PJSIP from the audio device. Called from
+    /// CallKitManager.provider(didDeactivate:) so PJSIP doesn't keep
+    /// the audio unit running when CallKit isn't using it. Signaling
+    /// (REGISTER, INVITE handling) continues — only media stops.
+    ///
+    /// pjsua_set_no_snd_dev returns a pjmedia_port* (the "null" sound
+    /// device port) rather than a pj_status_t; the side effect is
+    /// what we want, the return value is unused.
+    func stopAudioDevice() {
+        pjThread.performAsync { [weak self] in
+            guard let self = self, self.pjsuaStarted else { return }
+            _ = pjsua_set_no_snd_dev()
+            print("[SipManager] stopAudioDevice: detached")
         }
     }
 
