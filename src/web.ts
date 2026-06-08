@@ -16,6 +16,7 @@ import type {
   CallState,
   AudioRoute,
   ActiveCall,
+  CallPermissionStatus,
 } from './definitions';
 
 /**
@@ -286,6 +287,25 @@ export class PjsipWeb extends WebPlugin implements PjsipPlugin {
 
   async unregisterPush(): Promise<void> {
     // No-op on web
+  }
+
+  // --- Permissions ---
+  //
+  // Browsers handle mic/camera permissions inside getUserMedia rather
+  // than via a separate request API, and the W3C permissions API for
+  // media devices is inconsistent across browsers (Firefox returns
+  // 'prompt' even after a grant in some versions). We deliberately
+  // don't try to introspect it here — sip.js will trigger the actual
+  // prompt when it acquires the local stream at call-time, which is
+  // the correct moment on web. These return 'prompt' so callers can
+  // distinguish "we don't know" from "denied" without breaking.
+
+  async checkPermissions(): Promise<CallPermissionStatus> {
+    return { microphone: 'prompt', camera: 'prompt' };
+  }
+
+  async requestPermissions(): Promise<CallPermissionStatus> {
+    return { microphone: 'prompt', camera: 'prompt' };
   }
 
   async setAudioRoute(options: { route: AudioRoute }): Promise<void> {

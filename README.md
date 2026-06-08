@@ -40,6 +40,8 @@ npx cap sync
 * [`setAudioRoute(...)`](#setaudioroute)
 * [`registerPush()`](#registerpush)
 * [`unregisterPush()`](#unregisterpush)
+* [`checkPermissions()`](#checkpermissions)
+* [`requestPermissions(...)`](#requestpermissions)
 * [`addListener('callStateChanged', ...)`](#addlistenercallstatechanged-)
 * [`addListener('registrationStateChanged', ...)`](#addlistenerregistrationstatechanged-)
 * [`addListener('incomingCall', ...)`](#addlistenerincomingcall-)
@@ -232,6 +234,53 @@ unregisterPush() => Promise<void>
 --------------------
 
 
+### checkPermissions()
+
+```typescript
+checkPermissions() => Promise<CallPermissionStatus>
+```
+
+Check current OS-level permission state for mic + camera without
+prompting. Lets the UI decide whether to call `requestPermissions`
+(state=='prompt'), proceed straight to the call (state=='granted'),
+or show a deep-link-to-Settings nudge (state=='denied').
+
+Web returns 'prompt' for both — the browser doesn't expose this
+API for getUserMedia targets and prompts at media-acquire time.
+
+**Returns:** <code>Promise&lt;<a href="#callpermissionstatus">CallPermissionStatus</a>&gt;</code>
+
+--------------------
+
+
+### requestPermissions(...)
+
+```typescript
+requestPermissions(options?: RequestPermissionsOptions | undefined) => Promise<CallPermissionStatus>
+```
+
+Pre-request mic (and optionally camera) permission ahead of the
+first call. Without this, the iOS prompt only fires when the OS
+actually opens the input device — which is the moment CallKit
+tries to activate the audio session. A user who taps Deny at
+that moment leaves the call broken with no clean recovery path.
+
+The right time to call: just after a successful registration,
+when the user has signaled intent (signed in to a phone-enabled
+account) but isn't yet in the middle of a call.
+
+Web: no-op that resolves with 'prompt' for both — browsers ask
+at media-acquire time, not via a separate request API.
+
+| Param         | Type                                                                            |
+| ------------- | ------------------------------------------------------------------------------- |
+| **`options`** | <code><a href="#requestpermissionsoptions">RequestPermissionsOptions</a></code> |
+
+**Returns:** <code>Promise&lt;<a href="#callpermissionstatus">CallPermissionStatus</a>&gt;</code>
+
+--------------------
+
+
 ### addListener('callStateChanged', ...)
 
 ```typescript
@@ -327,6 +376,22 @@ in-flight calls instead of orphaning them.
 | **`state`**      | <code><a href="#callstate">CallState</a></code> |
 | **`remoteUri`**  | <code>string</code>                             |
 | **`callerName`** | <code>string</code>                             |
+
+
+#### CallPermissionStatus
+
+| Prop             | Type                                                        |
+| ---------------- | ----------------------------------------------------------- |
+| **`microphone`** | <code><a href="#permissionstate">PermissionState</a></code> |
+| **`camera`**     | <code><a href="#permissionstate">PermissionState</a></code> |
+
+
+#### RequestPermissionsOptions
+
+| Prop             | Type                 | Description                                                                                                                  |
+| ---------------- | -------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| **`microphone`** | <code>boolean</code> | Ask for microphone. Defaults to true — every audio call needs it.                                                            |
+| **`camera`**     | <code>boolean</code> | Ask for camera. Defaults to false — only set true when the caller knows video might be used (e.g. before joining a meeting). |
 
 
 #### PluginListenerHandle
@@ -432,6 +497,11 @@ Cross-platform notes:
 #### AudioRoute
 
 <code>'speaker' | 'earpiece' | 'bluetooth'</code>
+
+
+#### PermissionState
+
+<code>'prompt' | 'prompt-with-rationale' | 'granted' | 'denied'</code>
 
 
 #### PushPlatform

@@ -1,4 +1,5 @@
 import Foundation
+import AVFoundation
 import Capacitor
 
 @objc(PjsipPlugin)
@@ -20,6 +21,8 @@ public class PjsipPlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "setAudioRoute", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "registerPush", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "unregisterPush", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "checkPermissions", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "requestPermissions", returnType: CAPPluginReturnPromise),
     ]
 
     private lazy var sipManager: SipManager = {
@@ -224,6 +227,85 @@ public class PjsipPlugin: CAPPlugin, CAPBridgedPlugin {
     @objc func unregisterPush(_ call: CAPPluginCall) {
         pushManager.unregister()
         call.resolve()
+    }
+
+    // MARK: - Permissions
+
+    /// Check current OS permission state without prompting. Returns the
+    /// same shape as `requestPermissions` so a UI can decide whether
+    /// to call `requestPermissions` (state=='prompt') or show a
+    /// "go to Settings" nudge (state=='denied').
+    @objc func checkPermissions(_ call: CAPPluginCall) {
+        call.resolve([
+            "microphone": microphonePermissionState(),
+            "camera": cameraPermissionState(),
+        ])
+    }
+
+    /// Pre-request mic + camera permissions ahead of the first call.
+    /// Without this, the system prompt only fires when CallKit
+    /// activates AVAudioSession (mic) or PJSIP opens the input device
+    /// — which is the exact moment the call should start. If the user
+    /// taps Deny then, the call dies with no recovery path. Prompting
+    /// up-front lets the user decide before they're under pressure.
+    ///
+    /// JS passes `mic: true` (always required) and `camera: true`
+    /// (only when the caller knows video might be used). Returns the
+    /// post-request state for each so JS can branch on "denied → show
+    /// nudge" without calling checkPermissions again.
+    @objc func requestPermissions(_ call: CAPPluginCall) {
+        let askMic = call.getBool("microphone") ?? true
+        let askCamera = call.getBool("camera") ?? false
+
+        let group = DispatchGroup()
+
+        if askMic {
+            group.enter()
+            // requestRecordPermission has been deprecated in iOS 17 in
+            // favor of AVAudioApplication.requestRecordPermission, but
+            // we still target iOS 15+ so the older API is the one that
+            // compiles cleanly across the deployment range.
+            AVAudioSession.sharedInstance().requestRecordPermission { _ in
+                group.leave()
+            }
+        }
+
+        if askCamera {
+            group.enter()
+            AVCaptureDevice.requestAccess(for: .video) { _ in
+                group.leave()
+            }
+        }
+
+        group.notify(queue: .main) { [weak self] in
+            guard let self = self else { return }
+            call.resolve([
+                "microphone": self.microphonePermissionState(),
+                "camera": self.cameraPermissionState(),
+            ])
+        }
+    }
+
+    /// Map iOS's record-permission enum to our cross-platform string.
+    /// "granted" / "denied" / "prompt" — same shape as the W3C
+    /// permissions API and the @capacitor/* plugins so callers don't
+    /// need to learn yet another vocabulary.
+    private func microphonePermissionState() -> String {
+        switch AVAudioSession.sharedInstance().recordPermission {
+        case .granted: return "granted"
+        case .denied: return "denied"
+        case .undetermined: return "prompt"
+        @unknown default: return "prompt"
+        }
+    }
+
+    private func cameraPermissionState() -> String {
+        switch AVCaptureDevice.authorizationStatus(for: .video) {
+        case .authorized: return "granted"
+        case .denied, .restricted: return "denied"
+        case .notDetermined: return "prompt"
+        @unknown default: return "prompt"
+        }
     }
 }
 

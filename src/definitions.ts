@@ -49,6 +49,31 @@ export type SipTransport = 'udp' | 'tcp' | 'tls' | 'wss';
 export type PushPlatform = 'apns' | 'fcm' | 'web';
 
 /**
+ * OS permission state for the mic/camera. Mirrors the W3C
+ * permissions API and the @capacitor/* plugins so a single nudge
+ * UI in the app can speak the same vocabulary.
+ *
+ * - `granted`: user has approved; no prompt will appear
+ * - `denied`: user said no — only Settings can change this
+ * - `prompt`: never asked yet; calling `requestPermissions` will
+ *   trigger the system dialog
+ */
+export type PermissionState = 'granted' | 'denied' | 'prompt';
+
+export interface CallPermissionStatus {
+  microphone: PermissionState;
+  camera: PermissionState;
+}
+
+export interface RequestPermissionsOptions {
+  /** Ask for microphone. Defaults to true — every audio call needs it. */
+  microphone?: boolean;
+  /** Ask for camera. Defaults to false — only set true when the caller
+   *  knows video might be used (e.g. before joining a meeting). */
+  camera?: boolean;
+}
+
+/**
  * APNs environment for the push token. Sandbox is Xcode debug builds;
  * production is TestFlight / App Store. The PBX uses this to pick the
  * correct APNs endpoint per-token so a debug install and a TestFlight
@@ -188,6 +213,35 @@ export interface PjsipPlugin {
   // Push notifications
   registerPush(): Promise<void>;
   unregisterPush(): Promise<void>;
+
+  /**
+   * Check current OS-level permission state for mic + camera without
+   * prompting. Lets the UI decide whether to call `requestPermissions`
+   * (state=='prompt'), proceed straight to the call (state=='granted'),
+   * or show a deep-link-to-Settings nudge (state=='denied').
+   *
+   * Web returns 'prompt' for both — the browser doesn't expose this
+   * API for getUserMedia targets and prompts at media-acquire time.
+   */
+  checkPermissions(): Promise<CallPermissionStatus>;
+
+  /**
+   * Pre-request mic (and optionally camera) permission ahead of the
+   * first call. Without this, the iOS prompt only fires when the OS
+   * actually opens the input device — which is the moment CallKit
+   * tries to activate the audio session. A user who taps Deny at
+   * that moment leaves the call broken with no clean recovery path.
+   *
+   * The right time to call: just after a successful registration,
+   * when the user has signaled intent (signed in to a phone-enabled
+   * account) but isn't yet in the middle of a call.
+   *
+   * Web: no-op that resolves with 'prompt' for both — browsers ask
+   * at media-acquire time, not via a separate request API.
+   */
+  requestPermissions(
+    options?: RequestPermissionsOptions,
+  ): Promise<CallPermissionStatus>;
 
   // Events
   addListener(
