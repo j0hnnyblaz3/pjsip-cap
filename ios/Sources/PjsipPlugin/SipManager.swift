@@ -831,13 +831,47 @@ class SipManager: NSObject {
 
     func hangupCall(callId: String) {
         // Fast path — there's a real pjsua call, tear it down.
+        //
+        // Critical: do NOT optimistically remove from callMap/
+        // reverseCallMap here. The previous code removed maps on
+        // the caller's thread (main) before pjsua_call_hangup ran
+        // on pjThread — racy with the pjsip worker, and worse,
+        // if the BYE failed to leave the wire (stale TLS, network
+        // drop) the local side cleaned up while the remote softphone
+        // kept showing the call as live (user-reported: "i hung up
+        // on the phone but the softphone thought the call was still
+        // active"). Now we leave the maps alone here; the proper
+        // teardown happens in handleCallStateChange when PJSIP fires
+        // on_call_state with DISCONNECTED — which only happens
+        // after the BYE round-trip actually completes (or the
+        // transaction times out).
+        //
+        // The status check on pjsua_call_hangup is also new: a
+        // non-zero return means PJSIP couldn't even queue the BYE
+        // (e.g. invalid call id, transport gone). If we see that
+        // status logged after a "hangup not working" report, we
+        // know to look at transport state.
         if let pjCallId = reverseCallMap[callId] {
-            pjThread.performAsync { [self] in
-                pjsua_call_hangup(pjCallId, 0, nil, nil)
+            pjThread.performAsync { [weak self] in
+                let status = pjsua_call_hangup(pjCallId, 0, nil, nil)
+                if status == Int32(PJ_SUCCESS.rawValue) {
+                    print("[SipManager] hangupCall: BYE queued for pjCallId=\(pjCallId) (callId=\(callId))")
+                } else {
+                    print("[SipManager] hangupCall: pjsua_call_hangup failed status=\(status) (callId=\(callId))")
+                    // BYE couldn't be queued — force the local
+                    // cleanup so the UI doesn't stay stuck. Remote
+                    // will eventually time out the dialog on its own.
+                    self?.callMap.removeValue(forKey: pjCallId)
+                    self?.reverseCallMap.removeValue(forKey: callId)
+                    DispatchQueue.main.async {
+                        self?.delegate?.onCallStateChanged(
+                            callId: callId,
+                            state: "disconnected",
+                            remoteUri: nil
+                        )
+                    }
+                }
             }
-            callMap.removeValue(forKey: pjCallId)
-            reverseCallMap.removeValue(forKey: callId)
-            delegate?.onCallStateChanged(callId: callId, state: "disconnected", remoteUri: nil)
             return
         }
 
