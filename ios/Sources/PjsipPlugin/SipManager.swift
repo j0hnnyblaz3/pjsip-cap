@@ -728,6 +728,30 @@ class SipManager: NSObject {
         accCfg.reg_retry_interval = 300
         accCfg.reg_first_retry_interval = 30
 
+        // Tighten the registration refresh cycle and add SIP-level
+        // keep-alive, mirroring the web sip.js fix:
+        //
+        //   reg_timeout=180  →  refresh REGISTER every ~3 minutes
+        //     instead of PJSIP's default 3600s (1 hour). The SBC
+        //     drops stale contacts faster after a real network loss
+        //     (no "phone rings but no audio" ghost-contact window),
+        //     and we detect upstream auth/policy drift within minutes
+        //     rather than within an hour.
+        //
+        //   ka_interval=30  →  PJSIP sends a SIP-level CRLF ping on
+        //     the registration transport every 30s. Required to keep
+        //     idle TLS sockets alive through aggressive corporate
+        //     NAT / proxies / some mobile carriers that close idle
+        //     TCP connections within 60-90s. Without it, the TLS
+        //     socket goes silent and dies while we look-registered-
+        //     but-aren't until the next REGISTER refresh notices.
+        //
+        // These match what web/sip.js sets (keepAliveInterval=30 +
+        // expires=180) — same defenses, same numbers, both ends of
+        // the client behave identically against the SBC.
+        accCfg.reg_timeout = 180
+        accCfg.ka_interval = 30
+
         var accId: pjsua_acc_id = -1
         let status = pjsua_acc_add(&accCfg, pj_bool_t(1), &accId)
         guard status == Int32(PJ_SUCCESS.rawValue) else {
