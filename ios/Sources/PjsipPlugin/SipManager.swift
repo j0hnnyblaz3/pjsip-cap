@@ -1,5 +1,6 @@
 import Foundation
 import AVFoundation
+import Network
 import PjsipSDK
 
 /// Custom log writer that filters out the spammy capdbuf/playdbuf
@@ -229,12 +230,78 @@ class SipManager: NSObject {
     private var lastForceRegisterAt: Date?
     private static let FORCE_REGISTER_DEBOUNCE_SEC: TimeInterval = 1.0
 
+    /// Network-path monitor for re-REGISTER on Wi-Fi ↔ cellular
+    /// handover. When the device switches interfaces, the SBC's stored
+    /// Contact (the previous-interface IP) is unreachable from the
+    /// new interface — next INVITE has nowhere to land. We watch
+    /// NWPathMonitor for an interface change and fire forceRegister
+    /// so the SBC gets a Contact reachable on the new path before
+    /// any incoming call attempts arrive. forceRegister's own debounce
+    /// keeps a flapping network from storming the SBC.
+    private let pathMonitor = NWPathMonitor()
+    private let pathMonitorQueue = DispatchQueue(label: "com.redyrect.pjsip.path-monitor")
+    private var lastNetworkPathSignature: String? = nil
+
     /// Dedicated thread for all PJSIP calls
     private let pjThread = PjsipThread()
 
     private override init() {
         super.init()
         pjThread.start()
+        startPathMonitor()
+    }
+
+    /// Subscribe to network-path updates. Fires forceRegister when:
+    ///   - The path becomes satisfied (status .satisfied) AND
+    ///   - The interface signature differs from what we last saw
+    ///     (Wi-Fi → cellular, cellular → Wi-Fi, or a new Wi-Fi).
+    /// We deliberately skip the initial path callback (no previous
+    /// signature to diff against) — the regular register() flow
+    /// handles the cold-start case. Subsequent changes trigger.
+    private func startPathMonitor() {
+        pathMonitor.pathUpdateHandler = { [weak self] path in
+            guard let self = self else { return }
+            // Build a stable signature from the available interfaces.
+            // Status alone isn't enough — going from Wi-Fi→cellular
+            // can leave status=.satisfied if both are momentarily
+            // available; the available-interfaces set is what
+            // actually changed.
+            let signature: String
+            if path.status == .satisfied {
+                let kinds = path.availableInterfaces
+                    .map { $0.type.signatureString }
+                    .sorted()
+                    .joined(separator: ",")
+                signature = "satisfied:\(kinds)"
+            } else {
+                signature = "unsatisfied"
+            }
+
+            let previous = self.lastNetworkPathSignature
+            self.lastNetworkPathSignature = signature
+
+            // First callback after start — establish baseline, no
+            // re-register (the explicit register() flow has it).
+            if previous == nil { return }
+            // No change → ignore (NWPathMonitor fires on every
+            // pathUpdate even when only metadata changed).
+            if previous == signature { return }
+
+            print("[SipManager] network path changed: \(previous!) → \(signature)")
+
+            // Only re-register when we actually have connectivity.
+            // .unsatisfied means we're offline — the next .satisfied
+            // change will trigger the REGISTER.
+            guard path.status == .satisfied else { return }
+            // Only re-register if we were ever supposed to be
+            // registered. registrationState gates this — if the user
+            // hasn't logged in to a SIP-enabled account, there's no
+            // account to refresh.
+            guard self.accountId != -1 else { return }
+
+            self.forceRegister()
+        }
+        pathMonitor.start(queue: pathMonitorQueue)
     }
 
     // MARK: - Registration
@@ -1373,4 +1440,25 @@ private func onCallState(callId: pjsua_call_id, event: UnsafeMutablePointer<pjsi
 /// Called by PJSIP when call media state changes
 private func onCallMediaState(callId: pjsua_call_id) {
     SipManager.shared.handleCallMediaState(pjCallId: callId)
+}
+
+// MARK: - NWPathMonitor helpers
+
+/// Stable string identity for a network interface type — used to
+/// detect handover (Wi-Fi → cellular, etc.) by comparing the set of
+/// available interface kinds before/after a path update. Apple
+/// doesn't give us a public stringification, so we map each case
+/// explicitly; the `.other` fallback keeps unknown future interfaces
+/// from accidentally hash-colliding with anything.
+private extension NWInterface.InterfaceType {
+    var signatureString: String {
+        switch self {
+        case .wifi: return "wifi"
+        case .cellular: return "cellular"
+        case .wiredEthernet: return "ethernet"
+        case .loopback: return "loopback"
+        case .other: return "other"
+        @unknown default: return "unknown"
+        }
+    }
 }
