@@ -3,6 +3,7 @@ import {
   UserAgent,
   Registerer,
   RegistererState,
+  TransportState,
   Inviter,
   Invitation,
   SessionState,
@@ -51,6 +52,12 @@ export class PjsipWeb extends WebPlugin implements PjsipPlugin {
       authorizationPassword: options.password,
       transportOptions: {
         server: wsServer,
+        // RFC 6223 CRLF keep-alive on the WSS every 30s. Required
+        // empirically through corporate NAT / proxies / some mobile
+        // carriers that close idle WebSocket connections within 60-90s.
+        // Without it the WSS dies silently while the user thinks they're
+        // still registered — next INVITE has nowhere to land.
+        keepAliveInterval: 30,
       },
       // Cap the ICE-gathering wait. sip.js defaults to 5000ms and many
       // browsers/networks never fire `icegatheringstatechange: complete`,
@@ -60,6 +67,14 @@ export class PjsipWeb extends WebPlugin implements PjsipPlugin {
       sessionDescriptionHandlerFactoryOptions: {
         iceGatheringTimeout: 1000,
       },
+      // sip.js's transport-level auto-reconnect. These are documented
+      // as deprecated in the type defs but the API surface they drive
+      // is still active and the only built-in way to recover a dropped
+      // WSS. 999 attempts × 4s delay covers ~1 hour of network
+      // outage; SipService.scheduleRetry is the umbrella above this
+      // for whole-account re-init when even reconnects don't work.
+      reconnectionAttempts: 999,
+      reconnectionDelay: 4,
       delegate: {
         onInvite: (invitation: Invitation) => {
           this.handleIncomingCall(invitation);
@@ -73,13 +88,65 @@ export class PjsipWeb extends WebPlugin implements PjsipPlugin {
 
     this.ua = new UserAgent(uaOptions);
 
+    // Subscribe to transport state — sip.js auto-reconnects the WSS
+    // via reconnectionAttempts but does NOT auto re-REGISTER once the
+    // socket comes back. Without this hook, the user looks registered
+    // for the brief moment between transport-down and the next
+    // refresh-window — and IS NOT actually reachable. Re-firing
+    // register() on every Connected event re-syncs the SBC's contact
+    // record immediately.
+    this.ua.transport.stateChange.addListener((state) => {
+      console.info(`[capacitor-pjsip] transport state → ${state}`);
+      if (state === TransportState.Connected && this.registerer) {
+        // Re-register if the Registerer thinks it's not registered.
+        // When the Registerer's own state is still Registered (refresh
+        // hasn't expired yet), skip — the SBC already has us.
+        if (this.registerer.state !== RegistererState.Registered) {
+          console.info(
+            '[capacitor-pjsip] transport reconnected — firing fresh REGISTER',
+          );
+          void this.registerer.register().catch((err) => {
+            console.warn(
+              '[capacitor-pjsip] re-register after transport reconnect failed:',
+              err,
+            );
+          });
+        }
+      }
+      if (state === TransportState.Disconnected) {
+        // Surface the drop to JS so SipService can flip the chip from
+        // green to "reconnecting" instead of staying stale-green until
+        // the next REGISTER refresh fails. sip.js's own auto-reconnect
+        // handles the recovery; this is just visibility.
+        if (this.registrationState === 'registered') {
+          this.updateRegistrationState('unregistered', 'transport disconnected');
+        }
+      }
+    });
+
     this.updateRegistrationState('registering');
 
     await this.ua.start();
 
-    this.registerer = new Registerer(this.ua);
+    this.registerer = new Registerer(this.ua, {
+      // Lower than sip.js's default 600s so:
+      //   1. The SBC drops stale contacts faster after a real loss
+      //      (no ghost-contact "phone rings but no audio" window).
+      //   2. The auto-refresh cycle fires more often, giving us a
+      //      faster signal when something's actually broken upstream.
+      // 180s = 3-minute refresh window, well inside any reasonable
+      // NAT timeout.
+      expires: 180,
+      // Refresh at 50% of expires instead of the default 99%. The
+      // 99% default means a refresh attempt 6 seconds before expiry —
+      // if it fails or the network blips, we lose registration with
+      // no headroom. 50% (90s in) gives us multiple retry windows
+      // before the SBC purges us.
+      refreshFrequency: 50,
+    });
 
     this.registerer.stateChange.addListener((state: RegistererState) => {
+      console.info(`[capacitor-pjsip] registerer state → ${state}`);
       switch (state) {
         case RegistererState.Registered:
           this.updateRegistrationState('registered');
@@ -88,7 +155,12 @@ export class PjsipWeb extends WebPlugin implements PjsipPlugin {
           this.updateRegistrationState('unregistered');
           break;
         case RegistererState.Terminated:
-          this.updateRegistrationState('unregistered');
+          // The Registerer is dead — sip.js won't re-register from
+          // this instance. Drop the reference so the next connect()
+          // builds a fresh one. SipService's state-machine handles
+          // the actual retry scheduling above us.
+          this.updateRegistrationState('unregistered', 'registerer terminated');
+          this.registerer = null;
           break;
       }
     });
