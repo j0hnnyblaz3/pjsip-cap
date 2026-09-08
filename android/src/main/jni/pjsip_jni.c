@@ -12,7 +12,11 @@
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
 
 /* Global references for callback dispatch */
-static JavaVM *g_vm = NULL;
+/* pjlib (os_core_unix.c, PJ_ANDROID) defines JNI_OnLoad itself and stores
+ * the JavaVM in pj_jni_jvm. Defining our own JNI_OnLoad here collides with
+ * it at link time (duplicate symbol), so we reuse pjlib's. */
+extern JavaVM *pj_jni_jvm;
+#define g_vm pj_jni_jvm
 static jobject g_callback = NULL;
 static pjsua_acc_id g_acc_id = PJSUA_INVALID_ID;
 static int g_started = 0;
@@ -173,10 +177,6 @@ static void on_call_media_state(pjsua_call_id call_id) {
 
 /* ---- JNI Methods ---- */
 
-JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
-    g_vm = vm;
-    return JNI_VERSION_1_6;
-}
 
 JNIEXPORT jint JNICALL
 Java_com_redyrect_pjsip_PjsipNative_init(JNIEnv *env, jclass cls, jobject callback) {
