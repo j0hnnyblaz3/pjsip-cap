@@ -54,6 +54,11 @@ endforeach()
 # Build the JNI shared library
 add_library(pjsip_jni SHARED pjsip_jni.c)
 
+# pjsip's config.h only picks up the generated compat headers
+# (pj/compat/os_auto.h, m_auto.h — endianness, OS, machine) when
+# PJ_AUTOCONF is defined, exactly as pjsip's own makefiles do.
+target_compile_definitions(pjsip_jni PRIVATE PJ_AUTOCONF=1)
+
 # Link everything together
 target_link_libraries(pjsip_jni
     # Wrap PJSIP libs in a group so the linker resolves circular deps
