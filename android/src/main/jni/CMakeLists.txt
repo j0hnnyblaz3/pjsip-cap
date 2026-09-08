@@ -1,5 +1,7 @@
 cmake_minimum_required(VERSION 3.22)
-project(pjsip_jni C)
+# CXX is required even though the shim is C: the prebuilt pjsip libs
+# (pjsua2, and_aud_mediacodec.cpp) are C++ and need libc++ at link time.
+project(pjsip_jni C CXX)
 
 # Determine architecture-specific lib suffix
 if(ANDROID_ABI STREQUAL "arm64-v8a")
@@ -58,6 +60,9 @@ add_library(pjsip_jni SHARED pjsip_jni.c)
 # (pj/compat/os_auto.h, m_auto.h — endianness, OS, machine) when
 # PJ_AUTOCONF is defined, exactly as pjsip's own makefiles do.
 target_compile_definitions(pjsip_jni PRIVATE PJ_AUTOCONF=1)
+# Link with the C++ driver so libc++ (exceptions, operator new, std::terminate)
+# is pulled in for the C++ objects inside the static pjsip libs.
+set_target_properties(pjsip_jni PROPERTIES LINKER_LANGUAGE CXX)
 
 # Link everything together
 target_link_libraries(pjsip_jni
@@ -67,6 +72,7 @@ target_link_libraries(pjsip_jni
     -Wl,--end-group
     # Android system libraries
     OpenSLES
+    mediandk    # AMediaCodec/AMediaFormat used by pjmedia-codec's Android MediaCodec backend
     log
     android
 )
