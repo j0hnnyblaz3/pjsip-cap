@@ -199,6 +199,15 @@ class PjsipPlugin : Plugin() {
     }
 
     @PluginMethod
+    fun updateCallDisplay(call: PluginCall) {
+        val callId = call.getString("callId") ?: return call.reject("Missing callId")
+        // Explicit null clears a previous override; absent means the same.
+        val displayName = call.getString("displayName")
+        CallConnectionService.updateCallDisplay(callId, displayName)
+        call.resolve()
+    }
+
+    @PluginMethod
     fun getActiveCalls(call: PluginCall) {
         val arr = JSArray()
         for (c in sipManager.getActiveCalls()) {

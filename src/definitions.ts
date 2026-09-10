@@ -9,6 +9,16 @@ export type RegistrationState =
   | 'unregistering'
   | 'failed';
 
+/** Media encryption policy handed to pjsip's `use_srtp`. */
+export type SrtpPolicy = 'disabled' | 'optional' | 'mandatory';
+
+/** Per-permission state, mirroring Capacitor's PermissionState vocabulary. */
+export type SipPermissionState = 'prompt' | 'prompt-with-rationale' | 'granted' | 'denied';
+
+export interface SipPermissionStatus {
+  microphone: SipPermissionState;
+}
+
 export type CallState =
   | 'calling'
   | 'incoming'
@@ -35,6 +45,11 @@ export interface SipAccountConfig {
   transport?: SipTransport;
   proxy?: string;          // outbound proxy / SBC URI (e.g. "sip:sbc.example.com:5060;lr")
   pushToken?: string;
+  /**
+   * Media encryption policy. Omit to leave the decision to the server.
+   * 'mandatory' fails the call rather than falling back to plain RTP.
+   */
+  srtpPolicy?: SrtpPolicy;
 }
 
 // --- Events ---
@@ -91,7 +106,7 @@ export interface PjsipPlugin {
   getRegistrationState(): Promise<{ state: RegistrationState }>;
 
   // Calls
-  makeCall(options: { uri: string }): Promise<{ callId: string }>;
+  makeCall(options: { uri: string; displayName?: string }): Promise<{ callId: string }>;
   answerCall(options: { callId: string }): Promise<void>;
   hangupCall(options: { callId: string }): Promise<void>;
 
@@ -110,6 +125,24 @@ export interface PjsipPlugin {
   setAudioRoute(options: { route: AudioRoute }): Promise<void>;
 
   // Push notifications
+  /**
+   * Update the caller name shown by the OS call UI (CallKit on iOS,
+   * ConnectionService on Android) for a call already in progress.
+   * Pass null to clear a previous override.
+   */
+  updateCallDisplay(options: {
+    callId: string;
+    displayName: string | null;
+  }): Promise<void>;
+
+  /** Current microphone permission, without prompting. */
+  checkPermissions(): Promise<SipPermissionStatus>;
+
+  /** Prompt for microphone permission. */
+  requestPermissions(options?: {
+    microphone?: boolean;
+  }): Promise<SipPermissionStatus>;
+
   registerPush(): Promise<void>;
   unregisterPush(): Promise<void>;
 

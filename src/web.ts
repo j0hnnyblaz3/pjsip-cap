@@ -16,6 +16,7 @@ import type {
   CallState,
   AudioRoute,
   ActiveCall,
+  SipPermissionStatus,
 } from './definitions';
 
 /**
@@ -93,6 +94,24 @@ export class PjsipWeb extends WebPlugin implements PjsipPlugin {
     });
 
     await this.registerer.register();
+  }
+
+  async updateCallDisplay(_options: {
+    callId: string;
+    displayName: string | null;
+  }): Promise<void> {
+    // No OS-level call UI on the web — the in-app UI already shows the name.
+  }
+
+  async checkPermissions(): Promise<SipPermissionStatus> {
+    // The browser decides at getUserMedia time; nothing to report up front.
+    return { microphone: 'prompt' };
+  }
+
+  async requestPermissions(_options?: {
+    microphone?: boolean;
+  }): Promise<SipPermissionStatus> {
+    return { microphone: 'prompt' };
   }
 
   async unregister(): Promise<void> {

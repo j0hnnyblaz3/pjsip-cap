@@ -52,6 +52,19 @@ class CallKitManager: NSObject {
         }
     }
 
+    /// Update the caller name CallKit shows for a call already in progress.
+    /// Used once the app resolves a SIP handle to a real person, so the lock
+    /// screen and Dynamic Island stop showing a bare number.
+    func updateCallDisplay(callId: String, displayName: String?) {
+        guard let uuid = reverseCallMap[callId] else {
+            print("[CallKitManager] updateCallDisplay: no live call for \(callId)")
+            return
+        }
+        let update = CXCallUpdate()
+        update.localizedCallerName = displayName
+        provider.reportCall(with: uuid, updated: update)
+    }
+
     func reportOutgoingCall(callId: String, handle: String) {
         let uuid = UUID()
         callMap[uuid] = callId

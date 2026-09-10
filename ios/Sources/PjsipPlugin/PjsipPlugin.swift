@@ -1,5 +1,6 @@
 import Foundation
 import Capacitor
+import AVFoundation
 
 @objc(PjsipPlugin)
 public class PjsipPlugin: CAPPlugin, CAPBridgedPlugin {
@@ -18,6 +19,9 @@ public class PjsipPlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "sendDtmf", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "transferCall", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "setAudioRoute", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "updateCallDisplay", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "checkPermissions", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "requestPermissions", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "registerPush", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "unregisterPush", returnType: CAPPluginReturnPromise),
     ]
@@ -41,6 +45,48 @@ public class PjsipPlugin: CAPPlugin, CAPBridgedPlugin {
         manager.callKitManager = callKitManager
         return manager
     }()
+
+    // MARK: - Call display
+
+    @objc func updateCallDisplay(_ call: CAPPluginCall) {
+        guard let callId = call.getString("callId") else {
+            call.reject("Missing callId")
+            return
+        }
+        // Explicit null clears a previous override; absent is the same thing.
+        let displayName = call.getString("displayName")
+        callKitManager.updateCallDisplay(callId: callId, displayName: displayName)
+        call.resolve()
+    }
+
+    // MARK: - Permissions
+
+    private func microphoneState() -> String {
+        switch AVAudioSession.sharedInstance().recordPermission {
+        case .granted: return "granted"
+        case .denied: return "denied"
+        case .undetermined: return "prompt"
+        @unknown default: return "prompt"
+        }
+    }
+
+    @objc override public func checkPermissions(_ call: CAPPluginCall) {
+        call.resolve(["microphone": microphoneState()])
+    }
+
+    @objc override public func requestPermissions(_ call: CAPPluginCall) {
+        // Already decided — iOS will not show the sheet twice, so answer now
+        // rather than leaving the caller waiting on a prompt that never appears.
+        guard AVAudioSession.sharedInstance().recordPermission == .undetermined else {
+            call.resolve(["microphone": microphoneState()])
+            return
+        }
+        AVAudioSession.sharedInstance().requestRecordPermission { [weak self] _ in
+            DispatchQueue.main.async {
+                call.resolve(["microphone": self?.microphoneState() ?? "prompt"])
+            }
+        }
+    }
 
     // MARK: - Registration
 

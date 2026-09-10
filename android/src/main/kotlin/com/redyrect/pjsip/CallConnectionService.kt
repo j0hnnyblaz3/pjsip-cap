@@ -63,6 +63,15 @@ class CallConnectionService : ConnectionService() {
             }
         }
 
+        /** Update the caller name the system call UI shows for a live call,
+         *  once the app has resolved the SIP handle to a real person. */
+        fun updateCallDisplay(callId: String, displayName: String?) {
+            connections[callId]?.setCallerDisplayName(
+                displayName,
+                TelecomManager.PRESENTATION_ALLOWED
+            )
+        }
+
         fun reportCallEnded(callId: String) {
             connections[callId]?.let { conn ->
                 conn.setDisconnected(android.telecom.DisconnectCause(android.telecom.DisconnectCause.REMOTE))

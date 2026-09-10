@@ -38,6 +38,9 @@ npx cap sync
 * [`sendDtmf(...)`](#senddtmf)
 * [`transferCall(...)`](#transfercall)
 * [`setAudioRoute(...)`](#setaudioroute)
+* [`updateCallDisplay(...)`](#updatecalldisplay)
+* [`checkPermissions()`](#checkpermissions)
+* [`requestPermissions(...)`](#requestpermissions)
 * [`registerPush()`](#registerpush)
 * [`unregisterPush()`](#unregisterpush)
 * [`addListener('callStateChanged', ...)`](#addlistenercallstatechanged-)
@@ -88,12 +91,12 @@ getRegistrationState() => Promise<{ state: RegistrationState; }>
 ### makeCall(...)
 
 ```typescript
-makeCall(options: { uri: string; }) => Promise<{ callId: string; }>
+makeCall(options: { uri: string; displayName?: string; }) => Promise<{ callId: string; }>
 ```
 
-| Param         | Type                          |
-| ------------- | ----------------------------- |
-| **`options`** | <code>{ uri: string; }</code> |
+| Param         | Type                                                |
+| ------------- | --------------------------------------------------- |
+| **`options`** | <code>{ uri: string; displayName?: string; }</code> |
 
 **Returns:** <code>Promise&lt;{ callId: string; }&gt;</code>
 
@@ -206,6 +209,53 @@ setAudioRoute(options: { route: AudioRoute; }) => Promise<void>
 --------------------
 
 
+### updateCallDisplay(...)
+
+```typescript
+updateCallDisplay(options: { callId: string; displayName: string | null; }) => Promise<void>
+```
+
+Update the caller name shown by the OS call UI (CallKit on iOS,
+ConnectionService on Android) for a call already in progress.
+Pass null to clear a previous override.
+
+| Param         | Type                                                          |
+| ------------- | ------------------------------------------------------------- |
+| **`options`** | <code>{ callId: string; displayName: string \| null; }</code> |
+
+--------------------
+
+
+### checkPermissions()
+
+```typescript
+checkPermissions() => Promise<SipPermissionStatus>
+```
+
+Current microphone permission, without prompting.
+
+**Returns:** <code>Promise&lt;<a href="#sippermissionstatus">SipPermissionStatus</a>&gt;</code>
+
+--------------------
+
+
+### requestPermissions(...)
+
+```typescript
+requestPermissions(options?: { microphone?: boolean | undefined; } | undefined) => Promise<SipPermissionStatus>
+```
+
+Prompt for microphone permission.
+
+| Param         | Type                                   |
+| ------------- | -------------------------------------- |
+| **`options`** | <code>{ microphone?: boolean; }</code> |
+
+**Returns:** <code>Promise&lt;<a href="#sippermissionstatus">SipPermissionStatus</a>&gt;</code>
+
+--------------------
+
+
 ### registerPush()
 
 ```typescript
@@ -293,16 +343,17 @@ addListener(event: 'pushTokenUpdated', listener: (data: PushTokenEvent) => void)
 
 #### SipAccountConfig
 
-| Prop            | Type                                                  |
-| --------------- | ----------------------------------------------------- |
-| **`server`**    | <code>string</code>                                   |
-| **`port`**      | <code>number</code>                                   |
-| **`username`**  | <code>string</code>                                   |
-| **`password`**  | <code>string</code>                                   |
-| **`domain`**    | <code>string</code>                                   |
-| **`transport`** | <code><a href="#siptransport">SipTransport</a></code> |
-| **`proxy`**     | <code>string</code>                                   |
-| **`pushToken`** | <code>string</code>                                   |
+| Prop             | Type                                                  | Description                                                                                                                          |
+| ---------------- | ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| **`server`**     | <code>string</code>                                   |                                                                                                                                      |
+| **`port`**       | <code>number</code>                                   |                                                                                                                                      |
+| **`username`**   | <code>string</code>                                   |                                                                                                                                      |
+| **`password`**   | <code>string</code>                                   |                                                                                                                                      |
+| **`domain`**     | <code>string</code>                                   |                                                                                                                                      |
+| **`transport`**  | <code><a href="#siptransport">SipTransport</a></code> |                                                                                                                                      |
+| **`proxy`**      | <code>string</code>                                   |                                                                                                                                      |
+| **`pushToken`**  | <code>string</code>                                   |                                                                                                                                      |
+| **`srtpPolicy`** | <code><a href="#srtppolicy">SrtpPolicy</a></code>     | Media encryption policy. Omit to leave the decision to the server. 'mandatory' fails the call rather than falling back to plain RTP. |
 
 
 #### ActiveCall
@@ -318,6 +369,13 @@ in-flight calls instead of orphaning them.
 | **`state`**      | <code><a href="#callstate">CallState</a></code> |
 | **`remoteUri`**  | <code>string</code>                             |
 | **`callerName`** | <code>string</code>                             |
+
+
+#### SipPermissionStatus
+
+| Prop             | Type                                                              |
+| ---------------- | ----------------------------------------------------------------- |
+| **`microphone`** | <code><a href="#sippermissionstate">SipPermissionState</a></code> |
 
 
 #### PluginListenerHandle
@@ -346,11 +404,12 @@ in-flight calls instead of orphaning them.
 
 #### IncomingCallEvent
 
-| Prop             | Type                |
-| ---------------- | ------------------- |
-| **`callId`**     | <code>string</code> |
-| **`remoteUri`**  | <code>string</code> |
-| **`callerName`** | <code>string</code> |
+| Prop             | Type                | Description                                                                                                                                                                                                                                                                     |
+| ---------------- | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **`callId`**     | <code>string</code> |                                                                                                                                                                                                                                                                                 |
+| **`remoteUri`**  | <code>string</code> |                                                                                                                                                                                                                                                                                 |
+| **`callerName`** | <code>string</code> |                                                                                                                                                                                                                                                                                 |
+| **`callUuid`**   | <code>string</code> | The PBX-side call identifier, lifted from the INVITE's `X-Redyrect-Call-UUID` header when present. Lets the client address this specific call via REST (decline/hangup) and correlate with the FCM push that announced it. Optional — older PBX versions don't emit the header. |
 
 
 #### PushTokenEvent
@@ -369,6 +428,13 @@ in-flight calls instead of orphaning them.
 <code>'udp' | 'tcp' | 'tls' | 'wss'</code>
 
 
+#### SrtpPolicy
+
+Media encryption policy handed to pjsip's `use_srtp`.
+
+<code>'disabled' | 'optional' | 'mandatory'</code>
+
+
 #### RegistrationState
 
 <code>'unregistered' | 'registering' | 'registered' | 'unregistering' | 'failed'</code>
@@ -382,6 +448,13 @@ in-flight calls instead of orphaning them.
 #### AudioRoute
 
 <code>'speaker' | 'earpiece' | 'bluetooth'</code>
+
+
+#### SipPermissionState
+
+Per-permission state, mirroring Capacitor's PermissionState vocabulary.
+
+<code>'prompt' | 'prompt-with-rationale' | 'granted' | 'denied'</code>
 
 
 #### PushPlatform
