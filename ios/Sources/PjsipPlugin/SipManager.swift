@@ -97,6 +97,23 @@ class SipManager: NSObject {
     private var reverseCallMap: [String: pjsua_call_id] = [:]
     private var callIdCounter = 0
 
+    /// The one place a pjsua call id becomes a plugin-facing call id.
+    ///
+    /// pjsua does not guarantee that the incoming-call callback runs before the
+    /// first state change for the same call, so every entry point resolves
+    /// through here and whichever runs first allocates. Minting
+    /// "unknown-\(pjCallId)" in the state handler instead gave one call TWO
+    /// identities, and consumers latched onto the phantom — which has no
+    /// CallKit call behind it, so updateCallDisplay silently did nothing.
+    private func pluginId(for pjCallId: pjsua_call_id) -> String {
+        if let existing = callMap[pjCallId] { return existing }
+        callIdCounter += 1
+        let allocated = "ios-call-\(callIdCounter)"
+        callMap[pjCallId] = allocated
+        reverseCallMap[allocated] = pjCallId
+        return allocated
+    }
+
     /// The pjsua account id after successful registration
     private var accountId: pjsua_acc_id = -1
 
@@ -366,9 +383,6 @@ class SipManager: NSObject {
         var resultCallId: String? = nil
 
         pjThread.performSync { [self] in
-            callIdCounter += 1
-            let pluginCallId = "ios-call-\(callIdCounter)"
-
             var pjUri = pj_str_from_swift(uri)
             var pjCallId: pjsua_call_id = -1
 
@@ -378,9 +392,11 @@ class SipManager: NSObject {
                 return
             }
 
-            callMap[pjCallId] = pluginCallId
-            reverseCallMap[pluginCallId] = pjCallId
-            resultCallId = pluginCallId
+            // Allocate only once the pjsua id exists. Taking a counter value
+            // before the call is placed meant a state event arriving in
+            // between would allocate a different id for the same call.
+            // pluginId(for:) populates both maps.
+            resultCallId = pluginId(for: pjCallId)
         }
 
         if let callId = resultCallId {
@@ -509,11 +525,7 @@ class SipManager: NSObject {
     }
 
     func handleIncomingCall(accountId: pjsua_acc_id, pjCallId: pjsua_call_id, rdata: UnsafeMutablePointer<pjsip_rx_data>?) {
-        callIdCounter += 1
-        let pluginCallId = "ios-call-\(callIdCounter)"
-
-        callMap[pjCallId] = pluginCallId
-        reverseCallMap[pluginCallId] = pjCallId
+        let pluginCallId = pluginId(for: pjCallId)
 
         // Extract remote URI and caller name from call info
         var remoteUri = "unknown"
@@ -533,7 +545,7 @@ class SipManager: NSObject {
     }
 
     func handleCallStateChange(pjCallId: pjsua_call_id) {
-        let pluginCallId = callMap[pjCallId] ?? "unknown-\(pjCallId)"
+        let pluginCallId = pluginId(for: pjCallId)
 
         // pjsua invalidates the call before/while delivering the terminal
         // DISCONNECTED transition, so pjsua_call_get_info() routinely fails

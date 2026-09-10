@@ -66,6 +66,24 @@ class SipManager(private val context: Context) {
     )
     private val activeCalls = mutableMapOf<String, ActiveCallSnapshot>()
 
+    /**
+     * The one place a pjsip call id becomes a plugin-facing call id.
+     *
+     * pjsip does not guarantee that onIncomingCall arrives before the first
+     * onCallState for the same call, so both callbacks route through here and
+     * whichever runs first allocates. Every later event for that pjsip call
+     * resolves to the same string, which is what CallConnectionService and
+     * updateCallDisplay key on.
+     */
+    @Synchronized
+    private fun pluginIdFor(pjCallId: Int): String =
+        callMap.getOrPut(pjCallId) {
+            callIdCounter++
+            val allocated = "android-call-$callIdCounter"
+            reverseCallMap[allocated] = pjCallId
+            allocated
+        }
+
     private var pjsuaStarted = false
     private val mainHandler = Handler(Looper.getMainLooper())
 
@@ -83,10 +101,7 @@ class SipManager(private val context: Context) {
         }
 
         override fun onIncomingCall(pjCallId: Int, remoteUri: String) {
-            callIdCounter++
-            val pluginCallId = "android-call-$callIdCounter"
-            callMap[pjCallId] = pluginCallId
-            reverseCallMap[pluginCallId] = pjCallId
+            val pluginCallId = pluginIdFor(pjCallId)
 
             val callerName = extractDisplayName(remoteUri)
             activeCalls[pluginCallId] =
@@ -97,7 +112,12 @@ class SipManager(private val context: Context) {
         }
 
         override fun onCallState(pjCallId: Int, state: String, remoteUri: String) {
-            val pluginCallId = callMap[pjCallId] ?: "unknown-$pjCallId"
+            // Reuse the call's existing identity, allocating one if this event
+            // beat onIncomingCall. Fabricating "unknown-$pjCallId" here used to
+            // give a single call TWO identities — the phantom that arrived
+            // first and the real one moments later — and consumers latched
+            // onto the phantom, which has no ConnectionService behind it.
+            val pluginCallId = pluginIdFor(pjCallId)
 
             if (state == "disconnected") {
                 callMap.remove(pjCallId)
@@ -195,11 +215,10 @@ class SipManager(private val context: Context) {
         pjHandler.post {
             val pjCallId = PjsipNative.makeCall(uri)
             if (pjCallId >= 0) {
-                callIdCounter++
-                val pluginCallId = "android-call-$callIdCounter"
-                callMap[pjCallId] = pluginCallId
-                reverseCallMap[pluginCallId] = pjCallId
-                resultCallId = pluginCallId
+                // Same reason as the callbacks: pjsip can report state for
+                // this call before makeCall returns, so allocating a fresh id
+                // here would create a second identity for one call.
+                resultCallId = pluginIdFor(pjCallId)
             }
             latch.countDown()
         }
