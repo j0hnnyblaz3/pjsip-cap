@@ -153,7 +153,19 @@ static void on_call_state(pjsua_call_id call_id, pjsip_event *e) {
             case PJSIP_INV_STATE_NULL:          state = "null"; break;
             case PJSIP_INV_STATE_CALLING:       state = "calling"; break;
             case PJSIP_INV_STATE_INCOMING:      state = "incoming"; break;
-            case PJSIP_INV_STATE_EARLY:         state = "early"; break;
+            case PJSIP_INV_STATE_EARLY:
+                /* EARLY means opposite things by direction. Outbound: the far
+                 * end is ringing. Inbound: we answered the INVITE with 180
+                 * Ringing and the call is still waiting to be picked up. The
+                 * consumer must draw a ringing call with an Answer button for
+                 * the latter, so report it as "incoming" rather than leaking
+                 * a string that looks identical to an outbound call.
+                 *
+                 * ci.role is authoritative and available on the FIRST event,
+                 * unlike tracking direction from the incoming-call callback,
+                 * which pjsip delivers AFTER this one. */
+                state = (ci.role == PJSIP_ROLE_UAS) ? "incoming" : "early";
+                break;
             case PJSIP_INV_STATE_CONNECTING:    state = "connecting"; break;
             case PJSIP_INV_STATE_CONFIRMED:     state = "confirmed"; break;
             case PJSIP_INV_STATE_DISCONNECTED:  state = "disconnected"; break;

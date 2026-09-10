@@ -557,7 +557,7 @@ class SipManager: NSObject {
         // the only thing it can be is gone — never drop the event, because
         // every consumer treats a missing terminal state as "still up".
         let info = getCallInfo(pjCallId)
-        let state = info.map { mapCallState($0.state) } ?? "disconnected"
+        let state = info.map { mapCallState($0) } ?? "disconnected"
         let remoteUri = info.map { pjStringToSwift($0.remote_info) }
 
         if info == nil {
@@ -596,7 +596,7 @@ class SipManager: NSObject {
             let remoteUri = pjStringToSwift(info.remote_info)
             var entry: [String: Any] = [
                 "callId": pluginCallId,
-                "state": mapCallState(info.state),
+                "state": mapCallState(info),
             ]
             if !remoteUri.isEmpty { entry["remoteUri"] = remoteUri }
             if let name = extractDisplayName(from: remoteUri) {
@@ -616,12 +616,21 @@ class SipManager: NSObject {
         return info
     }
 
-    private func mapCallState(_ state: pjsip_inv_state) -> String {
+    /// `info` rather than just `state`, because EARLY means opposite things by
+    /// direction and only `role` distinguishes them.
+    private func mapCallState(_ info: pjsua_call_info) -> String {
+        let state = info.state
         switch state {
         case PJSIP_INV_STATE_NULL:        return "null"
         case PJSIP_INV_STATE_CALLING:     return "calling"
         case PJSIP_INV_STATE_INCOMING:    return "incoming"
-        case PJSIP_INV_STATE_EARLY:       return "early"
+        case PJSIP_INV_STATE_EARLY:
+            // Outbound: the far end is ringing. Inbound: we replied 180
+            // Ringing and the call still needs answering, which the consumer
+            // must draw with an Answer button. Reporting the raw string made
+            // an inbound call look identical to an outbound one, so the UI
+            // showed its in-call screen and there was no way to pick up.
+            return info.role == PJSIP_ROLE_UAS ? "incoming" : "early"
         case PJSIP_INV_STATE_CONNECTING:  return "connecting"
         case PJSIP_INV_STATE_CONFIRMED:   return "confirmed"
         case PJSIP_INV_STATE_DISCONNECTED: return "disconnected"
