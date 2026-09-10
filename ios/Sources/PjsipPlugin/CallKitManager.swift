@@ -71,6 +71,22 @@ class CallKitManager: NSObject {
         }
     }
 
+    /// Mirror a PJSIP call-state transition onto CallKit. CallKit keeps its
+    /// own copy of "is this call up", and it is the copy the system call UI,
+    /// audio session and lock screen read. Driving it from the same funnel
+    /// that emits to JS is what keeps the two from drifting — previously
+    /// nothing reported the connected state, so CallKit stayed in its
+    /// dialing state for the whole call.
+    func reportCallState(callId: String, state: String) {
+        switch state {
+        case "confirmed": reportCallConnected(callId: callId)
+        case "disconnected": reportCallEnded(callId: callId)
+        // calling/early/connecting are already reflected by the call's own
+        // initial CallKit state; nothing to mirror.
+        default: break
+        }
+    }
+
     func reportCallConnected(callId: String) {
         guard let uuid = reverseCallMap[callId] else { return }
         provider.reportOutgoingCall(with: uuid, connectedAt: nil)

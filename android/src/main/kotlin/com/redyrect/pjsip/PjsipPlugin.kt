@@ -56,9 +56,9 @@ class PjsipPlugin : Plugin() {
                 }
                 notifyListeners("callStateChanged", data)
 
-                if (state == "disconnected") {
-                    CallConnectionService.reportCallEnded(callId)
-                }
+                // Same funnel drives the platform call UI, so Telecom can
+                // never disagree with what JS was told.
+                CallConnectionService.reportCallState(callId, state)
             }
 
             override fun onIncomingCall(callId: String, remoteUri: String, callerName: String?) {

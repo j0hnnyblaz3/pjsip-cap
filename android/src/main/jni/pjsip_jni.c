@@ -127,24 +127,54 @@ static void on_incoming_call(pjsua_acc_id acc_id, pjsua_call_id call_id,
 }
 
 static void on_call_state(pjsua_call_id call_id, pjsip_event *e) {
+    PJ_UNUSED_ARG(e);
+
+    /* pjsua invalidates the call before/while delivering the terminal
+     * DISCONNECTED transition, so pjsua_call_get_info() routinely fails
+     * exactly here. Treating that failure as "nothing happened" is what
+     * used to strand the UI on a live call after the remote hung up.
+     *
+     * The invocation itself is the authoritative signal: pjsua called us
+     * for this call_id, so something changed. If we cannot read the call,
+     * the only thing it can be is gone. Never report "unknown" — every
+     * consumer (JS, Telecom) treats a non-terminal state as "still up". */
     pjsua_call_info ci;
-    pjsua_call_get_info(call_id, &ci);
+    pj_bzero(&ci, sizeof(ci));
 
     const char *state;
-    switch (ci.state) {
-        case PJSIP_INV_STATE_NULL:          state = "null"; break;
-        case PJSIP_INV_STATE_CALLING:       state = "calling"; break;
-        case PJSIP_INV_STATE_INCOMING:      state = "incoming"; break;
-        case PJSIP_INV_STATE_EARLY:         state = "early"; break;
-        case PJSIP_INV_STATE_CONNECTING:    state = "connecting"; break;
-        case PJSIP_INV_STATE_CONFIRMED:     state = "confirmed"; break;
-        case PJSIP_INV_STATE_DISCONNECTED:  state = "disconnected"; break;
-        default:                            state = "unknown"; break;
+    pj_status_t status = pjsua_call_get_info(call_id, &ci);
+
+    if (status != PJ_SUCCESS) {
+        LOGI("call %d: get_info failed (%d) — reporting disconnected",
+             (int)call_id, (int)status);
+        state = "disconnected";
+    } else {
+        switch (ci.state) {
+            case PJSIP_INV_STATE_NULL:          state = "null"; break;
+            case PJSIP_INV_STATE_CALLING:       state = "calling"; break;
+            case PJSIP_INV_STATE_INCOMING:      state = "incoming"; break;
+            case PJSIP_INV_STATE_EARLY:         state = "early"; break;
+            case PJSIP_INV_STATE_CONNECTING:    state = "connecting"; break;
+            case PJSIP_INV_STATE_CONFIRMED:     state = "confirmed"; break;
+            case PJSIP_INV_STATE_DISCONNECTED:  state = "disconnected"; break;
+            /* An inv_state pjsua added after this was written. Reporting it
+             * as still-up would strand the call; disconnected is the safe
+             * terminal answer and is logged so it can't pass unnoticed. */
+            default:
+                LOGE("call %d: unmapped inv_state %d — reporting disconnected",
+                     (int)call_id, (int)ci.state);
+                state = "disconnected";
+                break;
+        }
     }
 
     char remote_info[256];
-    snprintf(remote_info, sizeof(remote_info), "%.*s",
-             (int)ci.remote_info.slen, ci.remote_info.ptr);
+    if (status == PJ_SUCCESS && ci.remote_info.slen > 0) {
+        snprintf(remote_info, sizeof(remote_info), "%.*s",
+                 (int)ci.remote_info.slen, ci.remote_info.ptr);
+    } else {
+        remote_info[0] = '\0';
+    }
 
     int need_detach;
     JNIEnv *env = get_env(&need_detach);

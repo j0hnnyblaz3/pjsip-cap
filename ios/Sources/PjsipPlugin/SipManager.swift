@@ -509,13 +509,26 @@ class SipManager: NSObject {
     }
 
     func handleCallStateChange(pjCallId: pjsua_call_id) {
-        guard let info = getCallInfo(pjCallId) else { return }
-
         let pluginCallId = callMap[pjCallId] ?? "unknown-\(pjCallId)"
-        let state = mapCallState(info.state)
-        let remoteUri = pjStringToSwift(info.remote_info)
 
-        if info.state == PJSIP_INV_STATE_DISCONNECTED {
+        // pjsua invalidates the call before/while delivering the terminal
+        // DISCONNECTED transition, so pjsua_call_get_info() routinely fails
+        // exactly here. Returning early on that failure is what used to
+        // strand the UI on a live call after the remote hung up.
+        //
+        // The invocation itself is the authoritative signal: pjsua called us
+        // for this call, so something changed. If we cannot read the call,
+        // the only thing it can be is gone — never drop the event, because
+        // every consumer treats a missing terminal state as "still up".
+        let info = getCallInfo(pjCallId)
+        let state = info.map { mapCallState($0.state) } ?? "disconnected"
+        let remoteUri = info.map { pjStringToSwift($0.remote_info) }
+
+        if info == nil {
+            NSLog("[Pjsip] call \(pjCallId): get_info failed — reporting disconnected")
+        }
+
+        if state == "disconnected" {
             callMap.removeValue(forKey: pjCallId)
             reverseCallMap.removeValue(forKey: pluginCallId)
         }
@@ -576,7 +589,12 @@ class SipManager: NSObject {
         case PJSIP_INV_STATE_CONNECTING:  return "connecting"
         case PJSIP_INV_STATE_CONFIRMED:   return "confirmed"
         case PJSIP_INV_STATE_DISCONNECTED: return "disconnected"
-        default:                          return "unknown"
+        // An inv_state pjsua added after this was written. Reporting it as
+        // still-up would strand the call; disconnected is the safe terminal
+        // answer and is logged so it can't pass unnoticed.
+        default:
+            NSLog("[Pjsip] unmapped inv_state \(state.rawValue) — reporting disconnected")
+            return "disconnected"
         }
     }
 

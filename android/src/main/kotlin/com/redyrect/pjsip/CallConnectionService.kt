@@ -46,6 +46,23 @@ class CallConnectionService : ConnectionService() {
             telecomManager.placeCall(Uri.parse("sip:$uri"), extras)
         }
 
+        /** Mirror a PJSIP call-state transition onto the Telecom connection.
+         *  Telecom keeps its own copy of "is this call up", and it is the
+         *  copy the system call UI, audio routing and the ongoing-call
+         *  notification read. Driving it from the same funnel that emits to
+         *  JS is what keeps the two from drifting — previously nothing
+         *  reported the answered state, so Telecom sat in DIALING for the
+         *  whole call. */
+        fun reportCallState(callId: String, state: String) {
+            when (state) {
+                "confirmed" -> connections[callId]?.setActive()
+                "disconnected" -> reportCallEnded(callId)
+                // calling/early/connecting are already reflected by the
+                // connection's own initial state; nothing to mirror.
+                else -> Unit
+            }
+        }
+
         fun reportCallEnded(callId: String) {
             connections[callId]?.let { conn ->
                 conn.setDisconnected(android.telecom.DisconnectCause(android.telecom.DisconnectCause.REMOTE))

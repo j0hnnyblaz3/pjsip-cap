@@ -216,9 +216,9 @@ extension PjsipPlugin: SipManagerDelegate {
         }
         notifyListeners("callStateChanged", data: data)
 
-        if state == "disconnected" {
-            callKitManager.reportCallEnded(callId: callId)
-        }
+        // Same funnel drives the platform call UI, so CallKit can never
+        // disagree with what JS was told.
+        callKitManager.reportCallState(callId: callId, state: state)
     }
 
     func onIncomingCall(callId: String, remoteUri: String, callerName: String?) {
