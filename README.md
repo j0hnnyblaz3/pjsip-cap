@@ -437,7 +437,15 @@ Media encryption policy handed to pjsip's `use_srtp`.
 
 #### RegistrationState
 
-<code>'unregistered' | 'registering' | 'registered' | 'unregistering' | 'failed'</code>
+Registration lifecycle states this plugin actually emits.
+
+No `unregistering`: neither backend ever reports it. unregister() goes
+straight from `registered` to `unregistered` once the far end ACKs the
+de-REGISTER. Declaring it forced every consumer to handle a state that
+cannot occur, and narrowing it away was reported as a type error against
+accurate code.
+
+<code>'unregistered' | 'registering' | 'registered' | 'failed'</code>
 
 
 #### CallState
