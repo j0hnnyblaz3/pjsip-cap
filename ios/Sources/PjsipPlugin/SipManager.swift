@@ -10,6 +10,8 @@ struct SipConfig {
     let domain: String
     let transport: String
     let proxy: String?       // outbound proxy / SBC URI
+    /// 'disabled' | 'optional' | 'mandatory'. nil leaves pjsua's default.
+    let srtpPolicy: String?
 }
 
 protocol SipManagerDelegate: AnyObject {
@@ -308,6 +310,28 @@ class SipManager: NSObject {
         // (-1), PJSIP defaults to UDP for outbound — which silently
         // fails when only a TLS transport exists.
         accCfg.transport_id = self.transportId
+
+        // Media encryption. Only touched when the caller states a policy —
+        // otherwise pjsua's own default stands. srtp_secure_signaling is
+        // forced to 0 so this setting governs MEDIA only; requiring a secure
+        // signalling transport is the separate `transport` setting's job, and
+        // coupling them here would fail registrations the admin never asked
+        // to change.
+        if let policy = config.srtpPolicy?.lowercased(), !policy.isEmpty {
+            switch policy {
+            case "disabled":
+                accCfg.use_srtp = PJMEDIA_SRTP_DISABLED
+                accCfg.srtp_secure_signaling = 0
+            case "optional":
+                accCfg.use_srtp = PJMEDIA_SRTP_OPTIONAL
+                accCfg.srtp_secure_signaling = 0
+            case "mandatory":
+                accCfg.use_srtp = PJMEDIA_SRTP_MANDATORY
+                accCfg.srtp_secure_signaling = 0
+            default:
+                print("[SipManager] unknown srtpPolicy '\(policy)' — leaving pjsua default")
+            }
+        }
 
         accCfg.cred_count = 1
         accCfg.cred_info.0.realm = pj_str_from_swift("*")

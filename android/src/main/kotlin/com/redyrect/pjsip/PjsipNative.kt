@@ -23,7 +23,8 @@ object PjsipNative {
     @JvmStatic external fun start(): Int
     @JvmStatic external fun addAccount(
         sipUri: String, regUri: String, realm: String,
-        username: String, password: String, proxy: String?
+        username: String, password: String, proxy: String?,
+        srtp: Int
     ): Int
     @JvmStatic external fun removeAccount()
     @JvmStatic external fun destroy()

@@ -286,7 +286,7 @@ Java_com_redyrect_pjsip_PjsipNative_start(JNIEnv *env, jclass cls) {
 JNIEXPORT jint JNICALL
 Java_com_redyrect_pjsip_PjsipNative_addAccount(JNIEnv *env, jclass cls,
     jstring jsipUri, jstring jregUri, jstring jrealm,
-    jstring jusername, jstring jpassword, jstring jproxy) {
+    jstring jusername, jstring jpassword, jstring jproxy, jint jsrtp) {
 
     const char *sip_uri = (*env)->GetStringUTFChars(env, jsipUri, NULL);
     const char *reg_uri = (*env)->GetStringUTFChars(env, jregUri, NULL);
@@ -300,6 +300,16 @@ Java_com_redyrect_pjsip_PjsipNative_addAccount(JNIEnv *env, jclass cls,
 
     acc_cfg.id = pj_str((char*)sip_uri);
     acc_cfg.reg_uri = pj_str((char*)reg_uri);
+    /* Media encryption. -1 means the caller stated no policy, so pjsua's
+       default stands. srtp_secure_signaling is forced to 0 so this governs
+       MEDIA only — requiring a secure signalling transport is the separate
+       transport setting's job, and coupling them here would fail
+       registrations the admin never asked to change. */
+    if (jsrtp >= 0) {
+        acc_cfg.use_srtp = (pjmedia_srtp_use)jsrtp;
+        acc_cfg.srtp_secure_signaling = 0;
+    }
+
     acc_cfg.cred_count = 1;
     acc_cfg.cred_info[0].realm = pj_str((char*)realm);
     acc_cfg.cred_info[0].scheme = pj_str("digest");

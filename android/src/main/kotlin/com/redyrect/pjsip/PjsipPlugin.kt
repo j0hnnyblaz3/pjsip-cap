@@ -95,7 +95,8 @@ class PjsipPlugin : Plugin() {
             password = password,
             domain = domain,
             transport = call.getString("transport", "udp")!!,
-            proxy = call.getString("proxy")
+            proxy = call.getString("proxy"),
+            srtpPolicy = call.getString("srtpPolicy")
         )
 
         sipManager.register(config) { error ->

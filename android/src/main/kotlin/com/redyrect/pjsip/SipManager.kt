@@ -7,6 +7,14 @@ import android.os.HandlerThread
 import android.os.Looper
 import android.util.Log
 
+/** 'disabled'|'optional'|'mandatory' -> pjsip use_srtp; -1 = unspecified. */
+fun srtpPolicyToPjsip(policy: String?): Int = when (policy?.lowercase()) {
+    "disabled" -> 0
+    "optional" -> 1
+    "mandatory" -> 2
+    else -> -1
+}
+
 data class SipConfig(
     val server: String,
     val port: Int,
@@ -14,7 +22,9 @@ data class SipConfig(
     val password: String,
     val domain: String,
     val transport: String,
-    val proxy: String? = null
+    val proxy: String? = null,
+    /** 'disabled'|'optional'|'mandatory'. null leaves pjsua's default. */
+    val srtpPolicy: String? = null
 )
 
 /**
@@ -140,7 +150,8 @@ class SipManager(private val context: Context) {
                 }
 
                 val status = PjsipNative.addAccount(sipUri, regUri, "*",
-                    config.username, config.password, proxy)
+                    config.username, config.password, proxy,
+                    srtpPolicyToPjsip(config.srtpPolicy))
                 if (status != 0) throw Exception("account add failed: $status")
 
                 mainHandler.post { callback(null) }
