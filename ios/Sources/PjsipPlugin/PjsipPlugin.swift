@@ -1,6 +1,6 @@
 import Foundation
-import Capacitor
 import AVFoundation
+import Capacitor
 
 @objc(PjsipPlugin)
 public class PjsipPlugin: CAPPlugin, CAPBridgedPlugin {
@@ -19,11 +19,11 @@ public class PjsipPlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "sendDtmf", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "transferCall", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "setAudioRoute", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "updateCallDisplay", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "checkPermissions", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "requestPermissions", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "registerPush", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "unregisterPush", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "checkPermissions", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "requestPermissions", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "updateCallDisplay", returnType: CAPPluginReturnPromise),
     ]
 
     private lazy var sipManager: SipManager = {
@@ -46,48 +46,6 @@ public class PjsipPlugin: CAPPlugin, CAPBridgedPlugin {
         return manager
     }()
 
-    // MARK: - Call display
-
-    @objc func updateCallDisplay(_ call: CAPPluginCall) {
-        guard let callId = call.getString("callId") else {
-            call.reject("Missing callId")
-            return
-        }
-        // Explicit null clears a previous override; absent is the same thing.
-        let displayName = call.getString("displayName")
-        callKitManager.updateCallDisplay(callId: callId, displayName: displayName)
-        call.resolve()
-    }
-
-    // MARK: - Permissions
-
-    private func microphoneState() -> String {
-        switch AVAudioSession.sharedInstance().recordPermission {
-        case .granted: return "granted"
-        case .denied: return "denied"
-        case .undetermined: return "prompt"
-        @unknown default: return "prompt"
-        }
-    }
-
-    @objc override public func checkPermissions(_ call: CAPPluginCall) {
-        call.resolve(["microphone": microphoneState()])
-    }
-
-    @objc override public func requestPermissions(_ call: CAPPluginCall) {
-        // Already decided — iOS will not show the sheet twice, so answer now
-        // rather than leaving the caller waiting on a prompt that never appears.
-        guard AVAudioSession.sharedInstance().recordPermission == .undetermined else {
-            call.resolve(["microphone": microphoneState()])
-            return
-        }
-        AVAudioSession.sharedInstance().requestRecordPermission { [weak self] _ in
-            DispatchQueue.main.async {
-                call.resolve(["microphone": self?.microphoneState() ?? "prompt"])
-            }
-        }
-    }
-
     // MARK: - Registration
 
     @objc func register(_ call: CAPPluginCall) {
@@ -107,6 +65,10 @@ public class PjsipPlugin: CAPPlugin, CAPBridgedPlugin {
             domain: domain,
             transport: call.getString("transport") ?? "udp",
             proxy: call.getString("proxy"),
+            // The app's media-encryption setting (Admin → VoIP). nil
+            // leaves pjsua's default. FreeSWITCH behind dSIPRouter takes a
+            // clean RTP/SAVP offer ("mandatory") and rejects the OPTIONAL
+            // hybrid — set it there, not here.
             srtpPolicy: call.getString("srtpPolicy")
         )
 
@@ -142,9 +104,20 @@ public class PjsipPlugin: CAPPlugin, CAPBridgedPlugin {
             return
         }
 
+        // Optional displayName from the JS dialer — when set, CallKit
+        // shows this in the Dynamic Island / iOS Phone-app UI instead
+        // of the raw sip URI / Firebase UID. Without it the user sees
+        // strings like `y5ft3JFWtHPTewC8aiPwBEiQGpl1` as the call's
+        // identity, which is nonsense to a human.
+        let displayName = call.getString("displayName")
+
         let callId = sipManager.makeCall(uri: uri)
         if let callId = callId {
-            callKitManager.reportOutgoingCall(callId: callId, handle: uri)
+            callKitManager.reportOutgoingCall(
+                callId: callId,
+                handle: uri,
+                callerName: displayName
+            )
             call.resolve(["callId": callId])
         } else {
             call.reject("Failed to make call")
@@ -166,14 +139,42 @@ public class PjsipPlugin: CAPPlugin, CAPBridgedPlugin {
         }
     }
 
+    /// Push a fresh display name to CallKit AFTER an inbound call has
+    /// already been reported. The PBX's `From:` header on inbound calls
+    /// is `sip:<uid>@<host>` with no display-name part, so CallKit's
+    /// initial reportNewIncomingCall has nothing but a UID handle to
+    /// show — the Dynamic Island ends up displaying the raw Firebase
+    /// UID, which is meaningless to a human.
+    ///
+    /// The JS layer resolves the UID to a real user via GraphQL (in
+    /// SipContext) and then calls this so CallKit's
+    /// CXCallUpdate.localizedCallerName picks up the real name. Safe
+    /// to call multiple times — only updates if the call is still
+    /// known to CallKit.
+    @objc func updateCallDisplay(_ call: CAPPluginCall) {
+        guard let callId = call.getString("callId") else {
+            call.reject("Missing required field: callId")
+            return
+        }
+        let displayName = call.getString("displayName")
+        callKitManager.updateCallDisplay(callId: callId, callerName: displayName)
+        call.resolve()
+    }
+
     @objc func hangupCall(_ call: CAPPluginCall) {
         guard let callId = call.getString("callId") else {
             call.reject("Missing required field: callId")
             return
         }
 
+        // Don't optimistically call reportCallEnded here. PJSIP will
+        // emit a "disconnected" state change once the BYE/CANCEL is
+        // acknowledged (or after the local-force-disconnected fallback
+        // path in SipManager.hangupCall), and onCallStateChanged owns
+        // the single CallKit-end report. Doing it both here AND on
+        // disconnected leaves a stale entry in CallKit's recents log
+        // on the second invocation.
         sipManager.hangupCall(callId: callId)
-        callKitManager.reportCallEnded(callId: callId)
         call.resolve()
     }
 
@@ -243,6 +244,52 @@ public class PjsipPlugin: CAPPlugin, CAPBridgedPlugin {
         pushManager.unregister()
         call.resolve()
     }
+
+    // MARK: - Permissions
+    //
+    // CAPPlugin already declares checkPermissions / requestPermissions
+    // as `@objc open func` for Capacitor's standard permission
+    // protocol — these are overrides, not new methods. `override
+    // public` is required: Swift rejects an override that's less
+    // accessible than the base method, and the base is `open` (=
+    // public + overridable).
+
+    /// Current microphone permission, without prompting. The plugin is
+    /// audio-only (CallKit `supportsVideo = false`), so the contract reports
+    /// the microphone alone.
+    @objc override public func checkPermissions(_ call: CAPPluginCall) {
+        call.resolve(["microphone": microphonePermissionState()])
+    }
+
+    /// Ask for the microphone ahead of the first call. Without this the
+    /// system prompt only fires when CallKit activates the audio session —
+    /// the moment the call should start — and a Deny there leaves the call
+    /// broken with no recovery path. Resolves with the state afterwards.
+    @objc override public func requestPermissions(_ call: CAPPluginCall) {
+        guard call.getBool("microphone") ?? true,
+              AVAudioSession.sharedInstance().recordPermission == .undetermined else {
+            call.resolve(["microphone": microphonePermissionState()])
+            return
+        }
+        // requestRecordPermission is deprecated in iOS 17 for
+        // AVAudioApplication, but the deployment range still includes 15.
+        AVAudioSession.sharedInstance().requestRecordPermission { [weak self] _ in
+            DispatchQueue.main.async {
+                call.resolve(["microphone": self?.microphonePermissionState() ?? "prompt"])
+            }
+        }
+    }
+
+    /// iOS's record permission in the cross-platform vocabulary
+    /// (granted / denied / prompt).
+    private func microphonePermissionState() -> String {
+        switch AVAudioSession.sharedInstance().recordPermission {
+        case .granted: return "granted"
+        case .denied: return "denied"
+        case .undetermined: return "prompt"
+        @unknown default: return "prompt"
+        }
+    }
 }
 
 // MARK: - SipManagerDelegate
@@ -263,17 +310,41 @@ extension PjsipPlugin: SipManagerDelegate {
         }
         notifyListeners("callStateChanged", data: data)
 
-        // Same funnel drives the platform call UI, so CallKit can never
-        // disagree with what JS was told.
-        callKitManager.reportCallState(callId: callId, state: state)
+        // Drive CallKit's lifecycle from the authoritative SIP state.
+        // Two transitions matter here:
+        //   confirmed   → reportCallConnected (CXCall flips from
+        //                 "Connecting…" to live duration timer)
+        //   disconnected → reportCallEnded (clears the Dynamic Island
+        //                 entry, lets the OS finalize the call log)
+        // Note: we DON'T also fire reportCallEnded from hangupCall —
+        // hangupCall just initiates teardown; pjsua will follow up
+        // with a "disconnected" state change and we report ended once
+        // here. Double-reporting leaves a stale call in CallKit's call
+        // log on the second invocation.
+        switch state {
+        case "confirmed":
+            callKitManager.reportCallConnected(callId: callId)
+        case "disconnected":
+            callKitManager.reportCallEnded(callId: callId)
+        default:
+            break
+        }
     }
 
-    func onIncomingCall(callId: String, remoteUri: String, callerName: String?) {
+    func onIncomingCall(callId: String, remoteUri: String, callerName: String?, callUuid: String?) {
         callKitManager.reportIncomingCall(callId: callId, handle: remoteUri, callerName: callerName)
 
         var data: [String: Any] = ["callId": callId, "remoteUri": remoteUri]
         if let callerName = callerName {
             data["callerName"] = callerName
+        }
+        // Surface the PBX-side X-Redyrect-Call-UUID header to JS. When
+        // the INVITE carries this header (it always should from a
+        // Redyrect SBC), callId == callUuid — but we emit both fields
+        // anyway so the JS layer doesn't have to know about that
+        // identity-conflation rule. Web sip.js layer does the same.
+        if let callUuid = callUuid {
+            data["callUuid"] = callUuid
         }
         notifyListeners("incomingCall", data: data)
     }
@@ -284,31 +355,60 @@ extension PjsipPlugin: SipManagerDelegate {
 extension PjsipPlugin: PushManagerDelegate {
     func pushManagerDidReceiveVoIPPush(payload: [AnyHashable: Any]) {
         // CallKit was already reported synchronously by PushManager.
-        // CallKit was already reported synchronously by PushManager.
-        // The actual SIP INVITE will arrive via PJSIP's on_incoming_call callback
-        // which will trigger handleIncomingCall with proper pjsua call context.
-        // Just emit a JS event so the app knows a push arrived.
-        let callId = payload["callId"] as? String ?? "push-\(UUID().uuidString)"
-        let remoteUri = payload["remoteUri"] as? String ?? "unknown"
-        let callerName = payload["callerName"] as? String
-
-        var data: [String: Any] = ["callId": callId, "remoteUri": remoteUri]
-        if let callerName = callerName {
-            data["callerName"] = callerName
+        // The remaining work here is native-only — we deliberately do
+        // NOT fire a JS `incomingCall` event from the push, because:
+        //   - CallKit is the appropriate ringing surface on iOS, not
+        //     the in-app overlay. Firing a JS event would race with
+        //     CallKit and create a duplicate UI (and a stale Answer
+        //     button that calls pjsua.answer on a call that doesn't
+        //     exist yet).
+        //   - The JS layer learns about the call when the real SIP
+        //     INVITE arrives and handleIncomingCall fires its event
+        //     with the bridged callId.
+        //
+        // What we DO here:
+        //   1. Tell SipManager which call_uuid is incoming so when
+        //      the INVITE arrives carrying X-Redyrect-Call-UUID, the
+        //      pluginCallId binds to that pjsua call.
+        //   2. Force a fresh SIP REGISTER. iOS tore the TLS socket
+        //      when it suspended the app, so FreeSWITCH has a stale
+        //      contact — without this REGISTER, the INVITE the PBX
+        //      is about to send has nowhere to go and the caller is
+        //      bounced to voicemail.
+        let callUuid = payload["call_uuid"] as? String
+        if let uuid = callUuid {
+            sipManager.expectIncomingCall(callUuid: uuid)
         }
-        notifyListeners("incomingCall", data: data)
+        sipManager.forceRegister()
     }
 
-    func pushManagerDidUpdatePushToken(token: String) {
-        notifyListeners("pushTokenUpdated", data: ["token": token, "platform": "apns"])
+    func pushManagerDidUpdatePushToken(token: String, environment: String) {
+        // environment is "sandbox" or "production" — the PBX uses this to
+        // pick the right APNs endpoint for THIS specific token, so a debug
+        // Xcode build and a TestFlight build of the same app can coexist
+        // against the same global config. See PushManager.currentApnsEnvironment.
+        notifyListeners("pushTokenUpdated", data: [
+            "token": token,
+            "platform": "apns",
+            "environment": environment,
+        ])
     }
 }
 
 // MARK: - CallKitManagerDelegate
 
 extension PjsipPlugin: CallKitManagerDelegate {
-    func callKitDidAnswerCall(callId: String) {
-        sipManager.answerCall(callId: callId, completion: nil)
+    func callKitDidAnswerCall(callId: String, completion: @escaping (Bool) -> Void) {
+        // Forward the CallKit answer completion through to SipManager.
+        // For a real pjsua call this resolves immediately; for a push-
+        // only placeholder waiting on the INVITE, SipManager holds the
+        // completion until the INVITE lands (then completion(true)) or
+        // the 5s budget expires (then completion(false), which lets
+        // CallKit fail the action cleanly instead of leaving a stuck
+        // entry).
+        sipManager.answerCall(callId: callId) { error in
+            completion(error == nil)
+        }
     }
 
     func callKitDidEndCall(callId: String) {

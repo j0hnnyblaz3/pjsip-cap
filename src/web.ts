@@ -3,6 +3,7 @@ import {
   UserAgent,
   Registerer,
   RegistererState,
+  TransportState,
   Inviter,
   Invitation,
   SessionState,
@@ -51,6 +52,12 @@ export class PjsipWeb extends WebPlugin implements PjsipPlugin {
       authorizationPassword: options.password,
       transportOptions: {
         server: wsServer,
+        // RFC 6223 CRLF keep-alive on the WSS every 30s. Required
+        // empirically through corporate NAT / proxies / some mobile
+        // carriers that close idle WebSocket connections within 60-90s.
+        // Without it the WSS dies silently while the user thinks they're
+        // still registered — next INVITE has nowhere to land.
+        keepAliveInterval: 30,
       },
       // Cap the ICE-gathering wait. sip.js defaults to 5000ms and many
       // browsers/networks never fire `icegatheringstatechange: complete`,
@@ -60,6 +67,14 @@ export class PjsipWeb extends WebPlugin implements PjsipPlugin {
       sessionDescriptionHandlerFactoryOptions: {
         iceGatheringTimeout: 1000,
       },
+      // sip.js's transport-level auto-reconnect. These are documented
+      // as deprecated in the type defs but the API surface they drive
+      // is still active and the only built-in way to recover a dropped
+      // WSS. 999 attempts × 4s delay covers ~1 hour of network
+      // outage; SipService.scheduleRetry is the umbrella above this
+      // for whole-account re-init when even reconnects don't work.
+      reconnectionAttempts: 999,
+      reconnectionDelay: 4,
       delegate: {
         onInvite: (invitation: Invitation) => {
           this.handleIncomingCall(invitation);
@@ -73,13 +88,65 @@ export class PjsipWeb extends WebPlugin implements PjsipPlugin {
 
     this.ua = new UserAgent(uaOptions);
 
+    // Subscribe to transport state — sip.js auto-reconnects the WSS
+    // via reconnectionAttempts but does NOT auto re-REGISTER once the
+    // socket comes back. Without this hook, the user looks registered
+    // for the brief moment between transport-down and the next
+    // refresh-window — and IS NOT actually reachable. Re-firing
+    // register() on every Connected event re-syncs the SBC's contact
+    // record immediately.
+    this.ua.transport.stateChange.addListener((state) => {
+      console.info(`[capacitor-pjsip] transport state → ${state}`);
+      if (state === TransportState.Connected && this.registerer) {
+        // Re-register if the Registerer thinks it's not registered.
+        // When the Registerer's own state is still Registered (refresh
+        // hasn't expired yet), skip — the SBC already has us.
+        if (this.registerer.state !== RegistererState.Registered) {
+          console.info(
+            '[capacitor-pjsip] transport reconnected — firing fresh REGISTER',
+          );
+          void this.registerer.register().catch((err) => {
+            console.warn(
+              '[capacitor-pjsip] re-register after transport reconnect failed:',
+              err,
+            );
+          });
+        }
+      }
+      if (state === TransportState.Disconnected) {
+        // Surface the drop to JS so SipService can flip the chip from
+        // green to "reconnecting" instead of staying stale-green until
+        // the next REGISTER refresh fails. sip.js's own auto-reconnect
+        // handles the recovery; this is just visibility.
+        if (this.registrationState === 'registered') {
+          this.updateRegistrationState('unregistered', 'transport disconnected');
+        }
+      }
+    });
+
     this.updateRegistrationState('registering');
 
     await this.ua.start();
 
-    this.registerer = new Registerer(this.ua);
+    this.registerer = new Registerer(this.ua, {
+      // Lower than sip.js's default 600s so:
+      //   1. The SBC drops stale contacts faster after a real loss
+      //      (no ghost-contact "phone rings but no audio" window).
+      //   2. The auto-refresh cycle fires more often, giving us a
+      //      faster signal when something's actually broken upstream.
+      // 180s = 3-minute refresh window, well inside any reasonable
+      // NAT timeout.
+      expires: 180,
+      // Refresh at 50% of expires instead of the default 99%. The
+      // 99% default means a refresh attempt 6 seconds before expiry —
+      // if it fails or the network blips, we lose registration with
+      // no headroom. 50% (90s in) gives us multiple retry windows
+      // before the SBC purges us.
+      refreshFrequency: 50,
+    });
 
     this.registerer.stateChange.addListener((state: RegistererState) => {
+      console.info(`[capacitor-pjsip] registerer state → ${state}`);
       switch (state) {
         case RegistererState.Registered:
           this.updateRegistrationState('registered');
@@ -88,7 +155,12 @@ export class PjsipWeb extends WebPlugin implements PjsipPlugin {
           this.updateRegistrationState('unregistered');
           break;
         case RegistererState.Terminated:
-          this.updateRegistrationState('unregistered');
+          // The Registerer is dead — sip.js won't re-register from
+          // this instance. Drop the reference so the next connect()
+          // builds a fresh one. SipService's state-machine handles
+          // the actual retry scheduling above us.
+          this.updateRegistrationState('unregistered', 'registerer terminated');
+          this.registerer = null;
           break;
       }
     });
@@ -192,7 +264,15 @@ export class PjsipWeb extends WebPlugin implements PjsipPlugin {
         await session.bye();
         break;
     }
-    this.sessions.delete(options.callId);
+    // Don't `sessions.delete()` here. The `setupSessionListeners`
+    // stateChange handler removes on SessionState.Terminated — which
+    // is the authoritative transition once sip.js confirms the remote
+    // (or the local timer) finalized the dialog. Optimistic cleanup
+    // here matches the bug the iOS plugin warns about ("local side
+    // cleared while the remote softphone kept showing the call as
+    // live") if our local cancel/bye/reject fails to actually reach
+    // the SBC — we'd lose the ability to retry or to surface the
+    // ongoing state to the user.
   }
 
   async getActiveCalls(): Promise<{ calls: ActiveCall[] }> {
@@ -383,6 +463,14 @@ export class PjsipWeb extends WebPlugin implements PjsipPlugin {
 
   private setupSessionListeners(callId: string, session: Session): void {
     session.stateChange.addListener((state: SessionState) => {
+      // One-line trace so a "stuck in call" report can confirm whether
+      // sip.js's state machine actually transitioned. If we never see
+      // Terminating/Terminated for a call the user already hung up
+      // on, the issue is upstream of us (PBX didn't relay BYE, WSS
+      // dropped before BYE arrived, etc).
+      console.info(
+        `[capacitor-pjsip] session ${callId} → ${state}`,
+      );
       const mapped = this.mapSessionState(state, session);
       if (mapped) {
         this.notifyCallState(callId, mapped);
@@ -409,12 +497,16 @@ export class PjsipWeb extends WebPlugin implements PjsipPlugin {
     // otherwise be missed by our subscribers.
     //
     // See sip.js api/session-delegate.d.ts — onBye for established
-    // sessions, onCancel for INVITE-phase aborts.
+    // sessions, onCancel for INVITE-phase aborts. The delegate is
+    // called with the incoming Bye / Cancel request as the first arg;
+    // we ignore the body and just surface the disconnect.
     session.delegate = {
       onBye: () => {
+        console.info(`[capacitor-pjsip] onBye ${callId} (remote hangup)`);
         this.notifyCallState(callId, 'disconnected');
       },
       onCancel: () => {
+        console.info(`[capacitor-pjsip] onCancel ${callId} (remote cancel)`);
         this.notifyCallState(callId, 'disconnected');
       },
     };
@@ -428,6 +520,9 @@ export class PjsipWeb extends WebPlugin implements PjsipPlugin {
    *  `pc.connectionState` to 'disconnected' → 'failed'. That's an
    *  authoritative "the other side is gone" signal independent of
    *  SIP-layer events.
+   *
+   *  Also watches signalingState for hold/resume re-INVITES — see
+   *  watchHoldState for the rationale.
    *
    *  Bound at Established (when the peer connection exists) and
    *  removed when state transitions away or the call ends. */
@@ -447,9 +542,10 @@ export class PjsipWeb extends WebPlugin implements PjsipPlugin {
         );
         pc.removeEventListener('connectionstatechange', handler);
         this.notifyCallState(callId, 'disconnected');
-        this.sessions.delete(callId);
-        // Try to send BYE on our end so the PBX cleans up its leg too —
-        // best-effort, session may already be torn down.
+        // Authoritative cleanup happens via stateChange→Terminated in
+        // setupSessionListeners. Try to send BYE on our end so the
+        // PBX cleans up its leg too — best-effort, session may
+        // already be torn down.
         try {
           void session.bye();
         } catch {
@@ -458,6 +554,66 @@ export class PjsipWeb extends WebPlugin implements PjsipPlugin {
       }
     };
     pc.addEventListener('connectionstatechange', handler);
+    this.watchHoldState(callId, session, pc);
+  }
+
+  /** Track effective hold state by inspecting the remote SDP after
+   *  every re-negotiation. The local-hold path in `holdCall` already
+   *  emits 'held'/'confirmed' explicitly when the user pauses from
+   *  THIS side, but a *remote*-initiated hold (the other party's
+   *  softphone presses Hold) arrives as an incoming re-INVITE that
+   *  changes the remote SDP direction without firing any state-
+   *  transition we were listening for. Without this watch, the iOS
+   *  plugin would show 'held' for a remote hold (it derives from
+   *  PJSIP media_status) but the web build would stay on 'confirmed'
+   *  — same call, different state.
+   *
+   *  Direction attribute readings from the REMOTE description:
+   *    - sendrecv (or absent): nobody is holding → 'confirmed'
+   *    - sendonly: remote is sending (their hold music) → 'held'
+   *    - recvonly: WE held, remote answered recvonly → 'held'
+   *    - inactive: both holds, or some IVRs idle → 'held'
+   *
+   *  Both local- and remote-initiated holds end up showing as 'held'
+   *  in the UI — the user only cares that the audio is paused, not
+   *  which side paused it. This makes the same `watchHoldState`
+   *  handler the single source of truth for hold UI on web,
+   *  redundantly emitting alongside `holdCall`'s explicit notify but
+   *  with the same state — harmless. */
+  private watchHoldState(
+    callId: string,
+    session: Session,
+    pc: RTCPeerConnection,
+  ): void {
+    // Remember the last hold-state we emitted so a noisy
+    // signalingstatechange (one fires PER negotiation step) doesn't
+    // flood the bridge with redundant events.
+    let lastHeld: boolean | null = null;
+    const evaluate = () => {
+      // Only sample on `stable` — that's when offer/answer is done
+      // and the remote description reflects the final negotiated
+      // direction. Sampling mid-negotiation reads stale state.
+      if (pc.signalingState !== 'stable') return;
+      const sdp = pc.remoteDescription?.sdp;
+      if (!sdp) return;
+      const held = isAudioHeld(sdp);
+      if (held === lastHeld) return;
+      lastHeld = held;
+      // Don't fire while the session is mid-teardown — the
+      // stateChange→Terminated path owns that surface.
+      if (
+        session.state === SessionState.Terminated ||
+        session.state === SessionState.Terminating
+      ) {
+        return;
+      }
+      this.notifyCallState(callId, held ? 'held' : 'confirmed');
+    };
+    pc.addEventListener('signalingstatechange', evaluate);
+    // Sample once at install time too — covers the case where a
+    // hold-on-answer arrives (the PBX places the leg on hold the
+    // moment the call connects, e.g. a join-after-hold transfer).
+    evaluate();
   }
 
   /**
@@ -528,4 +684,28 @@ export class PjsipWeb extends WebPlugin implements PjsipPlugin {
     }
     return el;
   }
+}
+
+/**
+ * Returns true if the SDP advertises a paused-audio direction.
+ *
+ * A standard sendrecv media line has no direction attribute (or
+ * explicitly `a=sendrecv`). When a SIP hold takes effect the SDP for
+ * the audio media line is rewritten to one of:
+ *   - `a=sendonly` — the writer sends only (typical "I'm holding you")
+ *   - `a=recvonly` — the writer receives only (typical answer to a
+ *     remote sendonly offer when WE held them)
+ *   - `a=inactive` — neither direction (mutual hold / IVR idle)
+ *
+ * Any of those, found in the REMOTE description, means the call is
+ * not flowing audio in both directions — surface as 'held' in the UI.
+ *
+ * The regex is intentionally permissive: we don't try to scope to the
+ * audio m-section, because direction attributes only ever appear with
+ * a media line above them in practice (the session-level `a=`
+ * direction in RFC 4566 §6 is vanishingly rare and would mean the
+ * same thing for our purposes anyway).
+ */
+function isAudioHeld(sdp: string): boolean {
+  return /^a=(?:sendonly|recvonly|inactive)\b/m.test(sdp);
 }

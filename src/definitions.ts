@@ -17,9 +17,6 @@ export type RegistrationState =
   | 'registered'
   | 'failed';
 
-/** Media encryption policy handed to pjsip's `use_srtp`. */
-export type SrtpPolicy = 'disabled' | 'optional' | 'mandatory';
-
 /** Per-permission state, mirroring Capacitor's PermissionState vocabulary. */
 export type SipPermissionState = 'prompt' | 'prompt-with-rationale' | 'granted' | 'denied';
 
@@ -27,6 +24,23 @@ export interface SipPermissionStatus {
   microphone: SipPermissionState;
 }
 
+/**
+ * Call lifecycle states.
+ *
+ * Cross-platform notes:
+ *   • `calling` — outbound INVITE sent, no provisional response yet.
+ *   • `early` — outbound 183 Session Progress received (e.g. ringback
+ *     from the SBC). iOS distinguishes this; web's sip.js folds it
+ *     into `connecting`, so web never emits `early`. UI treats
+ *     `calling` and `early` identically ("Calling…").
+ *   • `connecting` — 200 OK received, ACK in flight (web) or
+ *     PJSIP_INV_STATE_CONNECTING transient (iOS).
+ *   • `confirmed` — ACK done, media flowing.
+ *   • `held` — synthesized: iOS derives from PJSIP media_status
+ *     (LOCAL_HOLD or REMOTE_HOLD); web currently only emits this on
+ *     local hold — see [[project_future_work]] for remote-hold
+ *     synthesis on web.
+ */
 export type CallState =
   | 'calling'
   | 'incoming'
@@ -42,6 +56,27 @@ export type SipTransport = 'udp' | 'tcp' | 'tls' | 'wss';
 
 export type PushPlatform = 'apns' | 'fcm' | 'web';
 
+/**
+ * APNs environment for the push token. Sandbox is Xcode debug builds;
+ * production is TestFlight / App Store. The PBX uses this to pick the
+ * correct APNs endpoint per-token so a debug install and a TestFlight
+ * install of the same app can coexist against the same global config.
+ */
+export type PushEnvironment = 'sandbox' | 'production';
+
+/**
+ * SRTP enforcement policy for outbound INVITEs:
+ * - `disabled`: plain RTP, no SAVP offer
+ * - `optional`: offer RTP/AVP with embedded crypto attribute (hybrid)
+ * - `mandatory`: offer RTP/SAVP profile cleanly (recommended for SBCs
+ *   like FreeSWITCH behind dSIPRouter which reject the OPTIONAL hybrid)
+ *
+ * Consumed by the native backends (iOS, Android); web (sip.js) leaves
+ * SRTP to the browser's DTLS-SRTP and ignores it. Omitted means the
+ * backend's own default — the policy is the app's setting.
+ */
+export type SrtpPolicy = 'disabled' | 'optional' | 'mandatory';
+
 // --- Config ---
 
 export interface SipAccountConfig {
@@ -52,6 +87,14 @@ export interface SipAccountConfig {
   domain: string;
   transport?: SipTransport;
   proxy?: string;          // outbound proxy / SBC URI (e.g. "sip:sbc.example.com:5060;lr")
+  /**
+   * Opaque push token forwarded to the SBC in the REGISTER's
+   * `pn-tok` / contact params so the server can wake the app via VoIP
+   * push when an INVITE arrives. Currently informational — the iOS
+   * backend acquires its own token via PushKit and the SBC pairs by
+   * extension, but the field is forwarded for SBCs that key on the
+   * registered token instead.
+   */
   pushToken?: string;
   /**
    * Media encryption policy. Omit to leave the decision to the server.
@@ -88,6 +131,13 @@ export interface IncomingCallEvent {
 export interface PushTokenEvent {
   token: string;
   platform: PushPlatform;
+  /**
+   * APNs environment (`sandbox` or `production`). Emitted on iOS only —
+   * web/FCM don't have the same dual-endpoint setup. Lets the PBX route
+   * pushes to the right APNs server for THIS specific token so debug
+   * and TestFlight installs of the same app can coexist.
+   */
+  environment?: PushEnvironment;
 }
 
 // --- Recovery ---
@@ -114,6 +164,15 @@ export interface PjsipPlugin {
   getRegistrationState(): Promise<{ state: RegistrationState }>;
 
   // Calls
+  /**
+   * Place an outbound call.
+   *
+   * `displayName` is optional and, on iOS, is fed into CallKit's
+   * `CXCallUpdate.localizedCallerName` so the Dynamic Island /
+   * Phone-app UI shows the contact's display name instead of the
+   * raw SIP URI / Firebase UID. Web ignores it (UI surfaces the
+   * dialer-known name itself).
+   */
   makeCall(options: { uri: string; displayName?: string }): Promise<{ callId: string }>;
   answerCall(options: { callId: string }): Promise<void>;
   hangupCall(options: { callId: string }): Promise<void>;
