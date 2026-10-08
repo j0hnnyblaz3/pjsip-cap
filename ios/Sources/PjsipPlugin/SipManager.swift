@@ -998,7 +998,7 @@ class SipManager: NSObject {
             guard let self = self,
                   let pjCallId = self.reverseCallMap[callId],
                   let info = self.getCallInfo(pjCallId) else { return }
-            pjsua_conf_adjust_tx_level(info.conf_slot, mute ? 0.0 : 1.0)
+            pjsua_conf_adjust_tx_level(info.confSlot, mute ? 0.0 : 1.0)
         }
     }
 
@@ -1149,7 +1149,7 @@ class SipManager: NSObject {
         var callerName: String? = nil
 
         if let info = getCallInfo(pjCallId) {
-            remoteUri = pjStringToSwift(info.remote_info)
+            remoteUri = info.remoteUri
             callerName = extractDisplayName(from: remoteUri)
         }
 
@@ -1226,7 +1226,7 @@ class SipManager: NSObject {
         // every consumer treats a missing terminal state as "still up".
         let info = getCallInfo(pjCallId)
         let state = info.map { effectiveCallState(info: $0) } ?? "disconnected"
-        let remoteUri = info.map { pjStringToSwift($0.remote_info) }
+        let remoteUri = info.map { $0.remoteUri }
         if info == nil {
             pjsipLog("[Pjsip] call \(pjCallId): get_info failed — reporting disconnected")
         }
@@ -1245,11 +1245,11 @@ class SipManager: NSObject {
     /// PJSIP_INV_STATE_CONFIRMED and the hold lives in media_status.
     /// The JS UI (ActiveCallScreen) needs to distinguish so the user
     /// sees Hold flip to Resume on tap. Synthesize the "held" state
-    /// from `info.media_status` when the call is otherwise confirmed.
-    private func effectiveCallState(info: pjsua_call_info) -> String {
+    /// from `info.mediaStatus` when the call is otherwise confirmed.
+    private func effectiveCallState(info: CallInfo) -> String {
         let base = mapCallState(info)
         if base == "confirmed" {
-            switch info.media_status {
+            switch info.mediaStatus {
             case PJSUA_CALL_MEDIA_LOCAL_HOLD,
                  PJSUA_CALL_MEDIA_REMOTE_HOLD:
                 return "held"
@@ -1274,20 +1274,20 @@ class SipManager: NSObject {
         // Without the disconnect branches, two concurrent calls would
         // both stay wired to slot 0 and audio would be mixed or
         // chaotic when the user swapped.
-        switch info.media_status {
+        switch info.mediaStatus {
         case PJSUA_CALL_MEDIA_ACTIVE:
-            pjsua_conf_connect(info.conf_slot, 0)  // call -> speaker
-            pjsua_conf_connect(0, info.conf_slot)  // mic  -> call
-            pjsipLog("[SipManager] handleCallMediaState: pjCallId=\(pjCallId) ACTIVE — bridges connected (slot=\(info.conf_slot))")
+            pjsua_conf_connect(info.confSlot, 0)  // call -> speaker
+            pjsua_conf_connect(0, info.confSlot)  // mic  -> call
+            pjsipLog("[SipManager] handleCallMediaState: pjCallId=\(pjCallId) ACTIVE — bridges connected (slot=\(info.confSlot))")
         case PJSUA_CALL_MEDIA_LOCAL_HOLD,
              PJSUA_CALL_MEDIA_REMOTE_HOLD:
-            pjsua_conf_disconnect(info.conf_slot, 0)
-            pjsua_conf_disconnect(0, info.conf_slot)
-            pjsipLog("[SipManager] handleCallMediaState: pjCallId=\(pjCallId) HOLD — bridges disconnected (slot=\(info.conf_slot))")
+            pjsua_conf_disconnect(info.confSlot, 0)
+            pjsua_conf_disconnect(0, info.confSlot)
+            pjsipLog("[SipManager] handleCallMediaState: pjCallId=\(pjCallId) HOLD — bridges disconnected (slot=\(info.confSlot))")
         case PJSUA_CALL_MEDIA_NONE,
              PJSUA_CALL_MEDIA_ERROR:
-            pjsua_conf_disconnect(info.conf_slot, 0)
-            pjsua_conf_disconnect(0, info.conf_slot)
+            pjsua_conf_disconnect(info.confSlot, 0)
+            pjsua_conf_disconnect(0, info.confSlot)
             pjsipLog("[SipManager] handleCallMediaState: pjCallId=\(pjCallId) NONE/ERROR — bridges disconnected")
         default:
             break
@@ -1303,7 +1303,7 @@ class SipManager: NSObject {
         // LOCAL_HOLD/REMOTE_HOLD on an otherwise confirmed call.
         let pluginCallId = pluginId(for: pjCallId)
         let state = effectiveCallState(info: info)
-        let remoteUri = pjStringToSwift(info.remote_info)
+        let remoteUri = info.remoteUri
         DispatchQueue.main.async { [weak self] in
             self?.delegate?.onCallStateChanged(
                 callId: pluginCallId,
@@ -1330,7 +1330,7 @@ class SipManager: NSObject {
                 guard let info = self.getCallInfo(pjCallId) else { continue }
                 if info.state == PJSIP_INV_STATE_DISCONNECTED
                     || info.state == PJSIP_INV_STATE_NULL { continue }
-                let remoteUri = pjStringToSwift(info.remote_info)
+                let remoteUri = info.remoteUri
                 var entry: [String: Any] = [
                     "callId": pluginCallId,
                     // effectiveCallState picks "held" when media is in
@@ -1350,16 +1350,27 @@ class SipManager: NSObject {
 
     // MARK: - Helpers
 
-    private func getCallInfo(_ pjCallId: pjsua_call_id) -> pjsua_call_info? {
-        var info = pjsua_call_info()
-        let status = pjsua_call_get_info(pjCallId, &info)
-        guard status == Int32(PJ_SUCCESS.rawValue) else { return nil }
-        return info
+    /// The one way to read a call. pjsua's strings (`remote_info` …) point
+    /// into the `buf_` of the struct it filled, so they are copied out here,
+    /// while that struct is alive — returning the struct and reading them
+    /// later read freed stack memory (a re-INVITE emitted `remoteUri: ""`).
+    private func getCallInfo(_ pjCallId: pjsua_call_id) -> CallInfo? {
+        let raw = UnsafeMutablePointer<pjsua_call_info>.allocate(capacity: 1)
+        defer { raw.deallocate() }
+        raw.initialize(to: pjsua_call_info())
+        guard pjsua_call_get_info(pjCallId, raw) == Int32(PJ_SUCCESS.rawValue) else { return nil }
+        return CallInfo(
+            state: raw.pointee.state,
+            role: raw.pointee.role,
+            mediaStatus: raw.pointee.media_status,
+            confSlot: raw.pointee.conf_slot,
+            remoteUri: pjStringToSwift(raw.pointee.remote_info)
+        )
     }
 
     /// `info` rather than just `state`, because EARLY means opposite things
     /// by direction and only `role` distinguishes them.
-    private func mapCallState(_ info: pjsua_call_info) -> String {
+    private func mapCallState(_ info: CallInfo) -> String {
         switch info.state {
         case PJSIP_INV_STATE_NULL:        return "null"
         case PJSIP_INV_STATE_CALLING:     return "calling"
@@ -1400,6 +1411,15 @@ class SipManager: NSObject {
             userInfo: [NSLocalizedDescriptionKey: "\(message): \(detail)"]
         )
     }
+}
+
+/// What the plugin reads of a pjsua call, with its strings owned by Swift.
+struct CallInfo {
+    let state: pjsip_inv_state
+    let role: pjsip_role_e
+    let mediaStatus: pjsua_call_media_status
+    let confSlot: pjsua_conf_port_id
+    let remoteUri: String
 }
 
 // MARK: - pj_str helpers
