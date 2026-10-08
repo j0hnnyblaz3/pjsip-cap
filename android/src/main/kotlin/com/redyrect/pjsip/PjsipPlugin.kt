@@ -35,48 +35,18 @@ class PjsipPlugin : Plugin() {
         private const val MIC_PERMISSION = "microphone"
     }
 
-    private lateinit var sipManager: SipManager
-
+    /** The bridge only: each method parses its arguments and asks
+     *  `CallController`, which owns the call lifecycle; its events come back
+     *  through `CallEventSink`. */
     override fun load() {
-        sipManager = SipManager(context)
-        sipManager.listener = object : SipManager.Listener {
-            override fun onRegistrationStateChanged(state: String, reason: String?) {
-                val data = JSObject().apply {
-                    put("state", state)
-                    reason?.let { put("reason", it) }
-                }
-                notifyListeners("registrationStateChanged", data)
-            }
-
-            override fun onCallStateChanged(callId: String, state: String, remoteUri: String?) {
-                val data = JSObject().apply {
-                    put("callId", callId)
-                    put("state", state)
-                    remoteUri?.let { put("remoteUri", it) }
-                }
-                notifyListeners("callStateChanged", data)
-
-                // Same funnel drives the platform call UI, so Telecom can
-                // never disagree with what JS was told.
-                CallConnectionService.reportCallState(callId, state)
-            }
-
-            override fun onIncomingCall(callId: String, remoteUri: String, callerName: String?) {
-                CallConnectionService.reportIncomingCall(context, callId, remoteUri, callerName)
-
-                val data = JSObject().apply {
-                    put("callId", callId)
-                    put("remoteUri", remoteUri)
-                    callerName?.let { put("callerName", it) }
-                }
-                notifyListeners("incomingCall", data)
+        CallController.start(context)
+        CallController.events = object : CallEventSink {
+            override fun emit(event: String, data: Map<String, Any?>) {
+                notifyListeners(event, JSObject().apply {
+                    for ((key, value) in data) value?.let { put(key, it) }
+                })
             }
         }
-
-        CallConnectionService.sipManager = sipManager
-
-        // Wire PushService so it can emit events to JS
-        PushService.plugin = this
     }
 
     // Registration
@@ -99,7 +69,7 @@ class PjsipPlugin : Plugin() {
             srtpPolicy = call.getString("srtpPolicy")
         )
 
-        sipManager.register(config) { error ->
+        CallController.register(config) { error ->
             if (error != null) {
                 call.reject("Registration failed: ${error.message}")
             } else {
@@ -110,7 +80,7 @@ class PjsipPlugin : Plugin() {
 
     @PluginMethod
     fun unregister(call: PluginCall) {
-        sipManager.unregister { error ->
+        CallController.unregister { error ->
             if (error != null) {
                 call.reject("Unregister failed: ${error.message}")
             } else {
@@ -122,7 +92,7 @@ class PjsipPlugin : Plugin() {
     @PluginMethod
     fun getRegistrationState(call: PluginCall) {
         call.resolve(JSObject().apply {
-            put("state", sipManager.registrationState)
+            put("state", CallController.registrationState)
         })
     }
 
@@ -152,9 +122,8 @@ class PjsipPlugin : Plugin() {
     private fun performMakeCall(call: PluginCall) {
         val uri = call.getString("uri") ?: return call.reject("Missing uri")
 
-        val callId = sipManager.makeCall(uri)
+        val callId = CallController.makeCall(uri)
         if (callId != null) {
-            CallConnectionService.reportOutgoingCall(context, callId, uri)
             call.resolve(JSObject().apply { put("callId", callId) })
         } else {
             call.reject("Failed to make call")
@@ -182,7 +151,7 @@ class PjsipPlugin : Plugin() {
     private fun performAnswerCall(call: PluginCall) {
         val callId = call.getString("callId") ?: return call.reject("Missing callId")
 
-        sipManager.answerCall(callId) { error ->
+        CallController.answer(callId) { error ->
             if (error != null) {
                 call.reject("Answer failed: ${error.message}")
             } else {
@@ -194,8 +163,7 @@ class PjsipPlugin : Plugin() {
     @PluginMethod
     fun hangupCall(call: PluginCall) {
         val callId = call.getString("callId") ?: return call.reject("Missing callId")
-        sipManager.hangupCall(callId)
-        CallConnectionService.reportCallEnded(callId)
+        CallController.hangup(callId)
         call.resolve()
     }
 
@@ -204,14 +172,14 @@ class PjsipPlugin : Plugin() {
         val callId = call.getString("callId") ?: return call.reject("Missing callId")
         // Explicit null clears a previous override; absent means the same.
         val displayName = call.getString("displayName")
-        CallConnectionService.updateCallDisplay(callId, displayName)
+        CallController.updateCallDisplay(callId, displayName)
         call.resolve()
     }
 
     @PluginMethod
     fun getActiveCalls(call: PluginCall) {
         val arr = JSArray()
-        for (c in sipManager.getActiveCalls()) {
+        for (c in CallController.activeCalls()) {
             val o = JSObject()
             for ((k, v) in c) o.put(k, v)
             arr.put(o)
@@ -225,7 +193,7 @@ class PjsipPlugin : Plugin() {
     fun holdCall(call: PluginCall) {
         val callId = call.getString("callId") ?: return call.reject("Missing callId")
         val hold = call.getBoolean("hold", true)!!
-        sipManager.holdCall(callId, hold)
+        CallController.hold(callId, hold)
         call.resolve()
     }
 
@@ -233,7 +201,7 @@ class PjsipPlugin : Plugin() {
     fun muteCall(call: PluginCall) {
         val callId = call.getString("callId") ?: return call.reject("Missing callId")
         val mute = call.getBoolean("mute", true)!!
-        sipManager.muteCall(callId, mute)
+        CallController.mute(callId, mute)
         call.resolve()
     }
 
@@ -241,7 +209,7 @@ class PjsipPlugin : Plugin() {
     fun sendDtmf(call: PluginCall) {
         val callId = call.getString("callId") ?: return call.reject("Missing callId")
         val digit = call.getString("digit") ?: return call.reject("Missing digit")
-        sipManager.sendDtmf(callId, digit)
+        CallController.sendDtmf(callId, digit)
         call.resolve()
     }
 
@@ -249,14 +217,14 @@ class PjsipPlugin : Plugin() {
     fun transferCall(call: PluginCall) {
         val callId = call.getString("callId") ?: return call.reject("Missing callId")
         val target = call.getString("target") ?: return call.reject("Missing target")
-        sipManager.transferCall(callId, target)
+        CallController.transfer(callId, target)
         call.resolve()
     }
 
     @PluginMethod
     fun setAudioRoute(call: PluginCall) {
         val route = call.getString("route") ?: return call.reject("Missing route")
-        sipManager.setAudioRoute(route)
+        CallController.setAudioRoute(route)
         call.resolve()
     }
 
@@ -266,11 +234,7 @@ class PjsipPlugin : Plugin() {
     fun registerPush(call: PluginCall) {
         FirebaseMessaging.getInstance().token.addOnCompleteListener { task ->
             if (task.isSuccessful) {
-                val token = task.result
-                notifyListeners("pushTokenUpdated", JSObject().apply {
-                    put("token", token)
-                    put("platform", "fcm")
-                })
+                CallController.pushTokenUpdated(task.result)
                 call.resolve()
             } else {
                 call.reject("Failed to get FCM token: ${task.exception?.message}")
@@ -287,23 +251,5 @@ class PjsipPlugin : Plugin() {
                 call.reject("Failed to delete FCM token: ${task.exception?.message}")
             }
         }
-    }
-
-    // Called by PushService when a new FCM token is issued
-    fun onPushTokenUpdated(token: String) {
-        notifyListeners("pushTokenUpdated", JSObject().apply {
-            put("token", token)
-            put("platform", "fcm")
-        })
-    }
-
-    // Called by PushService when an incoming call push arrives
-    fun onPushIncomingCall(callId: String, remoteUri: String, callerName: String?) {
-        val data = JSObject().apply {
-            put("callId", callId)
-            put("remoteUri", remoteUri)
-            callerName?.let { put("callerName", it) }
-        }
-        notifyListeners("incomingCall", data)
     }
 }

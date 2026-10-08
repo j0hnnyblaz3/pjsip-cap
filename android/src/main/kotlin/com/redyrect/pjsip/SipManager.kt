@@ -5,7 +5,6 @@ import android.media.AudioManager
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Looper
-import android.util.Log
 
 /** 'disabled'|'optional'|'mandatory' -> pjsip use_srtp; -1 = unspecified. */
 fun srtpPolicyToPjsip(policy: String?): Int = when (policy?.lowercase()) {
@@ -34,7 +33,6 @@ data class SipConfig(
 class SipManager(private val context: Context) {
 
     companion object {
-        private const val TAG = "PjsipSipManager"
     }
 
     interface Listener {
@@ -330,8 +328,7 @@ class SipManager(private val context: Context) {
      *  push delivery to both be live. The stub exists so the plugin
      *  compiles and the Phase 3 contract is documented in code. */
     fun handleIncomingCall(remoteUri: String, callerName: String?) {
-        Log.i(
-            TAG,
+        pjsipLog(
             "handleIncomingCall (push pre-INVITE): $remoteUri ($callerName) — " +
                 "stub; Phase 3 wires this to wake the SIP stack",
         )

@@ -7,9 +7,25 @@
 #include <pjsua-lib/pjsua.h>
 #include <android/log.h>
 
-#define TAG "PjsipJNI"
+/* One logcat tag for the whole plugin — Kotlin (Logging.kt) and PJSIP. */
+#define TAG "Pjsip"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
+
+/* PJSIP log callback: every PJSIP line to logcat, minus the sound-device
+ * underflow chatter that fires every ~20 ms while no media flows. */
+static void pjsip_log_writer(int level, const char *data, int len)
+{
+    char line[2048];
+    int n = len < (int)sizeof(line) - 1 ? len : (int)sizeof(line) - 1;
+    (void)level;
+    if (strstr(data, "Underflow") && (strstr(data, "capdbuf") || strstr(data, "playdbuf")))
+        return;
+    memcpy(line, data, (size_t)n);
+    while (n > 0 && (line[n - 1] == '\n' || line[n - 1] == '\r')) n--;
+    line[n] = '\0';
+    __android_log_write(ANDROID_LOG_INFO, TAG, line);
+}
 
 /* Global references for callback dispatch */
 /* pjlib (os_core_unix.c, PJ_ANDROID) defines JNI_OnLoad itself and stores
@@ -245,10 +261,17 @@ Java_com_redyrect_pjsip_PjsipNative_init(JNIEnv *env, jclass cls, jobject callba
     cfg.cb.on_call_state = &on_call_state;
     cfg.cb.on_call_media_state = &on_call_media_state;
 
+    /* PJSIP's own lines, SIP messages included, go to logcat through
+     * pjsip_log_writer. Without a callback pjsua's default writer prints to
+     * stdout, which Android discards. console_level gates the callback
+     * (pjsua hands it only lines at or below console_level), so it must
+     * match `level`. */
     pjsua_logging_config log_cfg;
     pjsua_logging_config_default(&log_cfg);
-    log_cfg.level = 4;
-    log_cfg.console_level = 4;
+    log_cfg.level = 5;
+    log_cfg.console_level = 5;
+    log_cfg.msg_logging = PJ_TRUE;
+    log_cfg.cb = &pjsip_log_writer;
 
     pjsua_media_config media_cfg;
     pjsua_media_config_default(&media_cfg);

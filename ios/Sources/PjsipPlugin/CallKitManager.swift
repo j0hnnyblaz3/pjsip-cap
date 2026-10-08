@@ -106,6 +106,68 @@ class CallKitManager: NSObject {
         }
     }
 
+    // MARK: - Requests from the app
+    //
+    // CallKit owns a call's lifecycle. The app's own Accept and Hang Up
+    // buttons ask CallKit, exactly as the system UI does, so answering and
+    // ending always run through the action handlers below — which drive
+    // PJSIP and, for an answer, activate the audio session. Answering pjsua
+    // directly left CallKit holding a still-ringing call with no audio
+    // session, which CallKit then ended on its own.
+
+    /// Ask CallKit to answer `callId`. Completion reports whether CallKit
+    /// accepted the request; the answer itself surfaces as call state.
+    func requestAnswer(callId: String, completion: @escaping (Error?) -> Void) {
+        request(callId: callId, label: "answer", completion: completion) { CXAnswerCallAction(call: $0) }
+    }
+
+    /// Ask CallKit to end `callId`, as the system End button does.
+    func requestEnd(callId: String, completion: @escaping (Error?) -> Void) {
+        request(callId: callId, label: "end", completion: completion) { CXEndCallAction(call: $0) }
+    }
+
+    /// Ask CallKit to hold or resume `callId`, so the system UI shows it.
+    func requestHold(callId: String, onHold: Bool, completion: @escaping (Error?) -> Void) {
+        request(callId: callId, label: onHold ? "hold" : "resume", completion: completion) {
+            CXSetHeldCallAction(call: $0, onHold: onHold)
+        }
+    }
+
+    /// Ask CallKit to mute or unmute `callId`, so the system UI shows it.
+    func requestMute(callId: String, muted: Bool, completion: @escaping (Error?) -> Void) {
+        request(callId: callId, label: muted ? "mute" : "unmute", completion: completion) {
+            CXSetMutedCallAction(call: $0, muted: muted)
+        }
+    }
+
+    private func request(
+        callId: String,
+        label: String,
+        completion: @escaping (Error?) -> Void,
+        action: @escaping (UUID) -> CXCallAction
+    ) {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { self.request(callId: callId, label: label, completion: completion, action: action) }
+            return
+        }
+        guard let uuid = reverseCallMap[callId] else {
+            pjsipLog("[CallKitManager] request \(label): CallKit has no call \(callId)")
+            completion(NSError(
+                domain: "PjsipPlugin",
+                code: -3,
+                userInfo: [NSLocalizedDescriptionKey: "CallKit has no call \(callId)"]
+            ))
+            return
+        }
+        pjsipLog("[CallKitManager] request \(label): \(callId)")
+        callController.request(CXTransaction(action: action(uuid))) { error in
+            if let error = error {
+                pjsipLog("[CallKitManager] request \(label) refused for \(callId): \(error)")
+            }
+            DispatchQueue.main.async { completion(error) }
+        }
+    }
+
     func reportOutgoingCall(callId: String, handle: String, callerName: String? = nil) {
         guard Thread.isMainThread else {
             DispatchQueue.main.async { self.reportOutgoingCall(callId: callId, handle: handle, callerName: callerName) }
@@ -298,9 +360,11 @@ extension CallKitManager: CXProviderDelegate {
 
     func provider(_ provider: CXProvider, perform action: CXAnswerCallAction) {
         guard let callId = callMap[action.callUUID] else {
+            pjsipLog("[CallKitManager] answer action: no call for \(action.callUUID) — failing")
             action.fail()
             return
         }
+        pjsipLog("[CallKitManager] answer action: \(callId)")
 
         // Defer fulfill — we don't know yet if the answer will
         // actually succeed. If the call is push-only (CallKit-reported
@@ -314,8 +378,10 @@ extension CallKitManager: CXProviderDelegate {
                 if success {
                     self?.configureAudioSession()
                     action.fulfill()
+                    pjsipLog("[CallKitManager] answer action fulfilled: \(callId)")
                 } else {
                     action.fail()
+                    pjsipLog("[CallKitManager] answer action failed: \(callId)")
                 }
             }
         }
@@ -323,9 +389,11 @@ extension CallKitManager: CXProviderDelegate {
 
     func provider(_ provider: CXProvider, perform action: CXEndCallAction) {
         guard let callId = callMap[action.callUUID] else {
+            pjsipLog("[CallKitManager] end action: no call for \(action.callUUID) — failing")
             action.fail()
             return
         }
+        pjsipLog("[CallKitManager] end action: \(callId)")
 
         delegate?.callKitDidEndCall(callId: callId)
         callMap.removeValue(forKey: action.callUUID)

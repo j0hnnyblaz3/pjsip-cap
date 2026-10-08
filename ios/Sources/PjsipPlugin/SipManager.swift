@@ -559,12 +559,12 @@ class SipManager: NSObject {
         // underflow lines that fire at this level are dropped by
         // pjsipFilteredLogWriter; everything else passes through.
         logCfg.level = 5
-        // console_level=0 stops PJSIP's built-in stderr writer.
-        // Combined with logCfg.cb below, every PJSIP log line flows
-        // through our filter exactly once — no built-in writer
-        // producing duplicates with the capdbuf/playdbuf lines we
-        // wanted to drop.
-        logCfg.console_level = 0
+        // console_level gates the callback, not just the built-in stderr
+        // writer: pjsua's log_writer hands a line to `cb` only when its level
+        // is <= console_level, and uses its own writer only when no cb is
+        // set. At 0 the callback never ran and no SIP message reached any
+        // log. With `cb` set there is no built-in writer to duplicate it.
+        logCfg.console_level = 5
         // msg_logging is true by default but set explicitly so we
         // never lose SIP wire-trace dumps even if a future PJSIP
         // version changes defaults.

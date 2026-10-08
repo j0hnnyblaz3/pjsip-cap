@@ -26,24 +26,13 @@ public class PjsipPlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "updateCallDisplay", returnType: CAPPluginReturnPromise),
     ]
 
-    private lazy var sipManager: SipManager = {
-        let manager = SipManager.shared
-        manager.delegate = self
-        return manager
-    }()
-
-    private lazy var callKitManager: CallKitManager = {
-        let manager = CallKitManager()
-        manager.delegate = self
-        return manager
-    }()
-
-    private lazy var pushManager: PushManager = {
-        let manager = PushManager()
-        manager.delegate = self
-        // Direct reference so push → CallKit is synchronous (iOS 13+ requirement)
-        manager.callKitManager = callKitManager
-        return manager
+    /// The bridge only: each method parses its arguments and asks the call
+    /// controller, which owns the call lifecycle; the controller's events
+    /// come back through `CallEventSink`.
+    private lazy var calls: CallController = {
+        let controller = CallController()
+        controller.events = self
+        return controller
     }()
 
     // MARK: - Registration
@@ -72,7 +61,7 @@ public class PjsipPlugin: CAPPlugin, CAPBridgedPlugin {
             srtpPolicy: call.getString("srtpPolicy")
         )
 
-        sipManager.register(config: config) { error in
+        calls.register(config: config) { error in
             if let error = error {
                 call.reject("Registration failed: \(error.localizedDescription)")
             } else {
@@ -82,8 +71,7 @@ public class PjsipPlugin: CAPPlugin, CAPBridgedPlugin {
     }
 
     @objc func unregister(_ call: CAPPluginCall) {
-        pushManager.unregister()
-        sipManager.unregister { error in
+        calls.unregister { error in
             if let error = error {
                 call.reject("Unregister failed: \(error.localizedDescription)")
             } else {
@@ -93,7 +81,7 @@ public class PjsipPlugin: CAPPlugin, CAPBridgedPlugin {
     }
 
     @objc func getRegistrationState(_ call: CAPPluginCall) {
-        call.resolve(["state": sipManager.registrationState])
+        call.resolve(["state": calls.registrationState])
     }
 
     // MARK: - Calls
@@ -111,13 +99,7 @@ public class PjsipPlugin: CAPPlugin, CAPBridgedPlugin {
         // identity, which is nonsense to a human.
         let displayName = call.getString("displayName")
 
-        let callId = sipManager.makeCall(uri: uri)
-        if let callId = callId {
-            callKitManager.reportOutgoingCall(
-                callId: callId,
-                handle: uri,
-                callerName: displayName
-            )
+        if let callId = calls.makeCall(uri: uri, displayName: displayName) {
             call.resolve(["callId": callId])
         } else {
             call.reject("Failed to make call")
@@ -130,7 +112,7 @@ public class PjsipPlugin: CAPPlugin, CAPBridgedPlugin {
             return
         }
 
-        sipManager.answerCall(callId: callId) { error in
+        calls.answer(callId: callId) { error in
             if let error = error {
                 call.reject("Answer failed: \(error.localizedDescription)")
             } else {
@@ -157,7 +139,7 @@ public class PjsipPlugin: CAPPlugin, CAPBridgedPlugin {
             return
         }
         let displayName = call.getString("displayName")
-        callKitManager.updateCallDisplay(callId: callId, callerName: displayName)
+        calls.updateCallDisplay(callId: callId, displayName: displayName)
         call.resolve()
     }
 
@@ -167,19 +149,13 @@ public class PjsipPlugin: CAPPlugin, CAPBridgedPlugin {
             return
         }
 
-        // Don't optimistically call reportCallEnded here. PJSIP will
-        // emit a "disconnected" state change once the BYE/CANCEL is
-        // acknowledged (or after the local-force-disconnected fallback
-        // path in SipManager.hangupCall), and onCallStateChanged owns
-        // the single CallKit-end report. Doing it both here AND on
-        // disconnected leaves a stale entry in CallKit's recents log
-        // on the second invocation.
-        sipManager.hangupCall(callId: callId)
-        call.resolve()
+        calls.end(callId: callId) {
+            call.resolve()
+        }
     }
 
     @objc func getActiveCalls(_ call: CAPPluginCall) {
-        call.resolve(["calls": sipManager.getActiveCalls()])
+        call.resolve(["calls": calls.activeCalls()])
     }
 
     // MARK: - In-call controls
@@ -190,7 +166,7 @@ public class PjsipPlugin: CAPPlugin, CAPBridgedPlugin {
             return
         }
         let hold = call.getBool("hold") ?? true
-        sipManager.holdCall(callId: callId, hold: hold)
+        calls.hold(callId: callId, hold: hold)
         call.resolve()
     }
 
@@ -200,7 +176,7 @@ public class PjsipPlugin: CAPPlugin, CAPBridgedPlugin {
             return
         }
         let mute = call.getBool("mute") ?? true
-        sipManager.muteCall(callId: callId, mute: mute)
+        calls.mute(callId: callId, mute: mute)
         call.resolve()
     }
 
@@ -210,7 +186,7 @@ public class PjsipPlugin: CAPPlugin, CAPBridgedPlugin {
             call.reject("Missing required fields: callId, digit")
             return
         }
-        sipManager.sendDtmf(callId: callId, digit: digit)
+        calls.sendDtmf(callId: callId, digit: digit)
         call.resolve()
     }
 
@@ -220,7 +196,7 @@ public class PjsipPlugin: CAPPlugin, CAPBridgedPlugin {
             call.reject("Missing required fields: callId, target")
             return
         }
-        sipManager.transferCall(callId: callId, target: target)
+        calls.transfer(callId: callId, target: target)
         call.resolve()
     }
 
@@ -229,19 +205,19 @@ public class PjsipPlugin: CAPPlugin, CAPBridgedPlugin {
             call.reject("Missing required field: route")
             return
         }
-        sipManager.setAudioRoute(route: route)
+        calls.setAudioRoute(route)
         call.resolve()
     }
 
     // MARK: - Push notifications
 
     @objc func registerPush(_ call: CAPPluginCall) {
-        pushManager.registerForVoIPPushes()
+        calls.registerPush()
         call.resolve()
     }
 
     @objc func unregisterPush(_ call: CAPPluginCall) {
-        pushManager.unregister()
+        calls.unregisterPush()
         call.resolve()
     }
 
@@ -292,134 +268,10 @@ public class PjsipPlugin: CAPPlugin, CAPBridgedPlugin {
     }
 }
 
-// MARK: - SipManagerDelegate
+// MARK: - CallEventSink
 
-extension PjsipPlugin: SipManagerDelegate {
-    func onRegistrationStateChanged(state: String, reason: String?) {
-        var data: [String: Any] = ["state": state]
-        if let reason = reason {
-            data["reason"] = reason
-        }
-        notifyListeners("registrationStateChanged", data: data)
-    }
-
-    func onCallStateChanged(callId: String, state: String, remoteUri: String?) {
-        var data: [String: Any] = ["callId": callId, "state": state]
-        if let remoteUri = remoteUri {
-            data["remoteUri"] = remoteUri
-        }
-        notifyListeners("callStateChanged", data: data)
-
-        // Drive CallKit's lifecycle from the authoritative SIP state.
-        // Two transitions matter here:
-        //   confirmed   → reportCallConnected (CXCall flips from
-        //                 "Connecting…" to live duration timer)
-        //   disconnected → reportCallEnded (clears the Dynamic Island
-        //                 entry, lets the OS finalize the call log)
-        // Note: we DON'T also fire reportCallEnded from hangupCall —
-        // hangupCall just initiates teardown; pjsua will follow up
-        // with a "disconnected" state change and we report ended once
-        // here. Double-reporting leaves a stale call in CallKit's call
-        // log on the second invocation.
-        switch state {
-        case "confirmed":
-            callKitManager.reportCallConnected(callId: callId)
-        case "disconnected":
-            callKitManager.reportCallEnded(callId: callId)
-        default:
-            break
-        }
-    }
-
-    func onIncomingCall(callId: String, remoteUri: String, callerName: String?, callUuid: String?) {
-        callKitManager.reportIncomingCall(callId: callId, handle: remoteUri, callerName: callerName)
-
-        var data: [String: Any] = ["callId": callId, "remoteUri": remoteUri]
-        if let callerName = callerName {
-            data["callerName"] = callerName
-        }
-        // Surface the PBX-side X-Redyrect-Call-UUID header to JS. When
-        // the INVITE carries this header (it always should from a
-        // Redyrect SBC), callId == callUuid — but we emit both fields
-        // anyway so the JS layer doesn't have to know about that
-        // identity-conflation rule. Web sip.js layer does the same.
-        if let callUuid = callUuid {
-            data["callUuid"] = callUuid
-        }
-        notifyListeners("incomingCall", data: data)
-    }
-}
-
-// MARK: - PushManagerDelegate
-
-extension PjsipPlugin: PushManagerDelegate {
-    func pushManagerDidReceiveVoIPPush(payload: [AnyHashable: Any]) {
-        // CallKit was already reported synchronously by PushManager.
-        // The remaining work here is native-only — we deliberately do
-        // NOT fire a JS `incomingCall` event from the push, because:
-        //   - CallKit is the appropriate ringing surface on iOS, not
-        //     the in-app overlay. Firing a JS event would race with
-        //     CallKit and create a duplicate UI (and a stale Answer
-        //     button that calls pjsua.answer on a call that doesn't
-        //     exist yet).
-        //   - The JS layer learns about the call when the real SIP
-        //     INVITE arrives and handleIncomingCall fires its event
-        //     with the bridged callId.
-        //
-        // What we DO here:
-        //   1. Tell SipManager which call_uuid is incoming so when
-        //      the INVITE arrives carrying X-Redyrect-Call-UUID, the
-        //      pluginCallId binds to that pjsua call.
-        //   2. Force a fresh SIP REGISTER. iOS tore the TLS socket
-        //      when it suspended the app, so FreeSWITCH has a stale
-        //      contact — without this REGISTER, the INVITE the PBX
-        //      is about to send has nowhere to go and the caller is
-        //      bounced to voicemail.
-        let callUuid = payload["call_uuid"] as? String
-        if let uuid = callUuid {
-            sipManager.expectIncomingCall(callUuid: uuid)
-        }
-        sipManager.forceRegister()
-    }
-
-    func pushManagerDidUpdatePushToken(token: String, environment: String) {
-        // environment is "sandbox" or "production" — the PBX uses this to
-        // pick the right APNs endpoint for THIS specific token, so a debug
-        // Xcode build and a TestFlight build of the same app can coexist
-        // against the same global config. See PushManager.currentApnsEnvironment.
-        notifyListeners("pushTokenUpdated", data: [
-            "token": token,
-            "platform": "apns",
-            "environment": environment,
-        ])
-    }
-}
-
-// MARK: - CallKitManagerDelegate
-
-extension PjsipPlugin: CallKitManagerDelegate {
-    func callKitDidAnswerCall(callId: String, completion: @escaping (Bool) -> Void) {
-        // Forward the CallKit answer completion through to SipManager.
-        // For a real pjsua call this resolves immediately; for a push-
-        // only placeholder waiting on the INVITE, SipManager holds the
-        // completion until the INVITE lands (then completion(true)) or
-        // the 5s budget expires (then completion(false), which lets
-        // CallKit fail the action cleanly instead of leaving a stuck
-        // entry).
-        sipManager.answerCall(callId: callId) { error in
-            completion(error == nil)
-        }
-    }
-
-    func callKitDidEndCall(callId: String) {
-        sipManager.hangupCall(callId: callId)
-    }
-
-    func callKitDidSetHeld(callId: String, isOnHold: Bool) {
-        sipManager.holdCall(callId: callId, hold: isOnHold)
-    }
-
-    func callKitDidSetMuted(callId: String, isMuted: Bool) {
-        sipManager.muteCall(callId: callId, mute: isMuted)
+extension PjsipPlugin: CallEventSink {
+    func emit(event: String, data: [String: Any]) {
+        notifyListeners(event, data: data)
     }
 }
