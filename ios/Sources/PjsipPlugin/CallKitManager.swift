@@ -43,8 +43,18 @@ class CallKitManager: NSObject {
     }
 
     // MARK: - Reporting calls to CallKit
+    //
+    // The call maps are CallKit's state and live on the main thread, where
+    // CXProvider delivers its actions (delegate queue nil). Plugin methods
+    // arrive on the Capacitor bridge thread, so each entry point hops to main
+    // first; on main already (PushKit's queue) it runs inline, which keeps
+    // reportNewIncomingCall inside the push handler as PushKit requires.
 
     func reportIncomingCall(callId: String, handle: String, callerName: String?) {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { self.reportIncomingCall(callId: callId, handle: handle, callerName: callerName) }
+            return
+        }
         // Dedup by callId. Both the VoIP push path and PJSIP's
         // on_incoming_call (after the INVITE lands) end up calling
         // this with the same callId — the push uses call_uuid, the
@@ -97,6 +107,10 @@ class CallKitManager: NSObject {
     }
 
     func reportOutgoingCall(callId: String, handle: String, callerName: String? = nil) {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { self.reportOutgoingCall(callId: callId, handle: handle, callerName: callerName) }
+            return
+        }
         let uuid = UUID()
         callMap[uuid] = callId
         reverseCallMap[callId] = uuid
@@ -162,6 +176,10 @@ class CallKitManager: NSObject {
     /// updateCallDisplay fired would still show the placeholder in
     /// Recents unless we also write the resolved name to the handle.
     func updateCallDisplay(callId: String, callerName: String?) {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { self.updateCallDisplay(callId: callId, callerName: callerName) }
+            return
+        }
         guard let uuid = reverseCallMap[callId] else { return }
         let update = CXCallUpdate()
         update.localizedCallerName = callerName
@@ -243,6 +261,10 @@ class CallKitManager: NSObject {
     }
 
     func reportCallConnected(callId: String) {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { self.reportCallConnected(callId: callId) }
+            return
+        }
         guard let uuid = reverseCallMap[callId] else { return }
         // Only outbound calls need the explicit connectedAt report —
         // inbound calls flip from ringing to connected when the
@@ -254,6 +276,10 @@ class CallKitManager: NSObject {
     }
 
     func reportCallEnded(callId: String) {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { self.reportCallEnded(callId: callId) }
+            return
+        }
         guard let uuid = reverseCallMap[callId] else { return }
         provider.reportCall(with: uuid, endedAt: nil, reason: .remoteEnded)
         callMap.removeValue(forKey: uuid)

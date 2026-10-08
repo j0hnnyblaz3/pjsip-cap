@@ -877,10 +877,17 @@ class SipManager: NSObject {
         return resultCallId
     }
 
+    // The call maps and the pending-push sets are touched only on pjThread,
+    // like every pjsua call: PJSIP's callbacks write them there, so a lookup
+    // from the Capacitor bridge thread raced those writes. Each entry point
+    // below resolves its call id inside the pjThread block.
+
     func answerCall(callId: String, completion: ((Error?) -> Void)?) {
-        // Fast path — pjsua call is already there, answer immediately.
-        if let pjCallId = reverseCallMap[callId] {
-            pjThread.performAsync { [self] in
+        pjThread.performAsync { [weak self] in
+            guard let self = self else { return }
+
+            // Fast path — pjsua call is already there, answer immediately.
+            if let pjCallId = self.reverseCallMap[callId] {
                 let status = pjsua_call_answer(pjCallId, 200, nil, nil)
                 if status == Int32(PJ_SUCCESS.rawValue) {
                     DispatchQueue.main.async { completion?(nil) }
@@ -889,49 +896,33 @@ class SipManager: NSObject {
                         completion?(self.sipError("pjsua_call_answer failed", status: status))
                     }
                 }
+                return
             }
-            return
-        }
 
-        // Slow path — push arrived but the SIP INVITE hasn't landed
-        // yet. Common when the user taps Accept the moment CallKit
-        // appears; the INVITE is still in flight from the PBX over
-        // TLS. We don't fulfill or fail the CallKit action here —
-        // the completion is held until either:
-        //   - handleIncomingCall fires for the matching UUID
-        //     (INVITE arrived → auto-answer, completion(nil)), or
-        //   - the 5s budget expires (no INVITE in time →
-        //     completion(error) → CallKit fails the action and
-        //     surfaces "Call Failed" to the user cleanly).
-        // This replaces the older 30s wall-clock cleanup timer —
-        // tied to actual user intent (Accept) rather than a
-        // background watchdog.
-        if pendingCallUuids.contains(callId) {
-            pjThread.performAsync { [weak self] in
-                guard let self = self else { return }
+            // Slow path — push arrived but the SIP INVITE hasn't landed
+            // yet. Common when the user taps Accept the moment CallKit
+            // appears; the INVITE is still in flight from the PBX over
+            // TLS. The CallKit completion is held until either:
+            //   - handleIncomingCall fires for the matching UUID
+            //     (INVITE arrived → auto-answer, completion(nil)), or
+            //   - the answer budget expires (no INVITE in time →
+            //     completion(error) → CallKit fails the action and
+            //     surfaces "Call Failed" to the user cleanly).
+            if self.pendingCallUuids.contains(callId) {
                 self.pendingAnswerCallUuids.insert(callId)
-                // Stash the CallKit completion until INVITE arrival
-                // or the budget expires. If completion is nil (e.g.
-                // an internal call from somewhere other than CallKit),
-                // we'd just drop it — but in practice the CallKit
-                // path always passes one.
                 if let completion = completion {
                     self.pendingAnswerCompletions[callId] = completion
                 }
-                print("[SipManager] answerCall: \(callId) pending INVITE — 5s budget armed")
+                print("[SipManager] answerCall: \(callId) pending INVITE — answer budget armed")
 
-                // Re-arm semantics: cancel any prior budget for the
-                // same UUID (shouldn't happen in practice — CallKit
-                // gives a single CXAnswerCallAction per call — but
-                // defensive).
+                // Re-arm semantics: cancel any prior budget for the same
+                // UUID (CallKit gives a single CXAnswerCallAction per call,
+                // but defensive).
                 self.pendingAnswerTimers[callId]?.cancel()
 
                 let work = DispatchWorkItem { [weak self] in
                     self?.pjThread.performAsync {
-                        self?.failPendingAnswer(
-                            callUuid: callId,
-                            reason: "INVITE timeout"
-                        )
+                        self?.failPendingAnswer(callUuid: callId, reason: "INVITE timeout")
                     }
                 }
                 self.pendingAnswerTimers[callId] = work
@@ -939,84 +930,68 @@ class SipManager: NSObject {
                     deadline: .now() + Self.ANSWER_WAIT_GRACE_SEC,
                     execute: work
                 )
+                return
             }
-            return
-        }
 
-        completion?(NSError(
-            domain: "PjsipPlugin",
-            code: -1,
-            userInfo: [NSLocalizedDescriptionKey: "Call not found"]
-        ))
+            DispatchQueue.main.async {
+                completion?(NSError(
+                    domain: "PjsipPlugin",
+                    code: -1,
+                    userInfo: [NSLocalizedDescriptionKey: "Call not found"]
+                ))
+            }
+        }
     }
 
     func hangupCall(callId: String) {
-        // Fast path — there's a real pjsua call, tear it down.
-        //
-        // Critical: do NOT optimistically remove from callMap/
-        // reverseCallMap here. The previous code removed maps on
-        // the caller's thread (main) before pjsua_call_hangup ran
-        // on pjThread — racy with the pjsip worker, and worse,
-        // if the BYE failed to leave the wire (stale TLS, network
-        // drop) the local side cleaned up while the remote softphone
-        // kept showing the call as live (user-reported: "i hung up
-        // on the phone but the softphone thought the call was still
-        // active"). Now we leave the maps alone here; the proper
-        // teardown happens in handleCallStateChange when PJSIP fires
-        // on_call_state with DISCONNECTED — which only happens
-        // after the BYE round-trip actually completes (or the
-        // transaction times out).
-        //
-        // The status check on pjsua_call_hangup is also new: a
-        // non-zero return means PJSIP couldn't even queue the BYE
-        // (e.g. invalid call id, transport gone). If we see that
-        // status logged after a "hangup not working" report, we
-        // know to look at transport state.
-        if let pjCallId = reverseCallMap[callId] {
-            pjThread.performAsync { [weak self] in
+        pjThread.performAsync { [weak self] in
+            guard let self = self else { return }
+
+            // Fast path — there's a real pjsua call, tear it down.
+            //
+            // Do NOT optimistically remove from the maps here: if the BYE
+            // fails to leave the wire (stale TLS, network drop) the local
+            // side would clean up while the remote kept the call live. The
+            // teardown happens in handleCallStateChange when PJSIP fires
+            // DISCONNECTED — after the BYE round-trip completes or the
+            // transaction times out.
+            if let pjCallId = self.reverseCallMap[callId] {
                 let status = pjsua_call_hangup(pjCallId, 0, nil, nil)
                 if status == Int32(PJ_SUCCESS.rawValue) {
                     print("[SipManager] hangupCall: BYE queued for pjCallId=\(pjCallId) (callId=\(callId))")
                 } else {
+                    // BYE couldn't be queued — force the local cleanup so
+                    // the UI doesn't stay stuck. The remote times the dialog
+                    // out on its own.
                     print("[SipManager] hangupCall: pjsua_call_hangup failed status=\(status) (callId=\(callId))")
-                    // BYE couldn't be queued — force the local
-                    // cleanup so the UI doesn't stay stuck. Remote
-                    // will eventually time out the dialog on its own.
-                    self?.callMap.removeValue(forKey: pjCallId)
-                    self?.reverseCallMap.removeValue(forKey: callId)
+                    self.callMap.removeValue(forKey: pjCallId)
+                    self.reverseCallMap.removeValue(forKey: callId)
                     DispatchQueue.main.async {
-                        self?.delegate?.onCallStateChanged(
-                            callId: callId,
-                            state: "disconnected",
-                            remoteUri: nil
-                        )
+                        self.delegate?.onCallStateChanged(callId: callId, state: "disconnected", remoteUri: nil)
                     }
                 }
+                return
             }
-            return
-        }
 
-        // Slow path — hangup on a push-only placeholder (CallKit
-        // reported, INVITE never arrived, user declined or CallKit's
-        // own ring timeout fired). Clear pending state. If the user
-        // had also tapped Accept and we're holding their CallKit
-        // answer completion, fail it so the action ends cleanly.
-        if pendingCallUuids.contains(callId) {
-            pjThread.performAsync { [weak self] in
-                guard let self = self else { return }
+            // Slow path — hangup on a push-only placeholder (CallKit
+            // reported, INVITE never arrived, user declined or CallKit's
+            // own ring timeout fired). Clear pending state, and fail a held
+            // CallKit answer completion so the action ends cleanly.
+            if self.pendingCallUuids.contains(callId) {
                 self.removePendingCallUuid(callId)
                 self.failPendingAnswer(callUuid: callId, reason: "call ended before INVITE")
+                DispatchQueue.main.async {
+                    self.delegate?.onCallStateChanged(callId: callId, state: "disconnected", remoteUri: nil)
+                }
             }
-            delegate?.onCallStateChanged(callId: callId, state: "disconnected", remoteUri: nil)
         }
     }
 
     // MARK: - In-call controls
 
     func holdCall(callId: String, hold: Bool) {
-        guard let pjCallId = reverseCallMap[callId] else { return }
-
-        pjThread.performAsync {
+        pjThread.performAsync { [weak self] in
+            guard let pjCallId = self?.reverseCallMap[callId] else { return }
             if hold {
                 pjsua_call_set_hold(pjCallId, nil)
             } else {
@@ -1026,31 +1001,25 @@ class SipManager: NSObject {
     }
 
     func muteCall(callId: String, mute: Bool) {
-        guard let pjCallId = reverseCallMap[callId] else { return }
-
-        pjThread.performAsync { [self] in
-            guard let info = self.getCallInfo(pjCallId) else { return }
-            if mute {
-                pjsua_conf_adjust_tx_level(info.conf_slot, 0.0)
-            } else {
-                pjsua_conf_adjust_tx_level(info.conf_slot, 1.0)
-            }
+        pjThread.performAsync { [weak self] in
+            guard let self = self,
+                  let pjCallId = self.reverseCallMap[callId],
+                  let info = self.getCallInfo(pjCallId) else { return }
+            pjsua_conf_adjust_tx_level(info.conf_slot, mute ? 0.0 : 1.0)
         }
     }
 
     func sendDtmf(callId: String, digit: String) {
-        guard let pjCallId = reverseCallMap[callId] else { return }
-
-        pjThread.performAsync {
+        pjThread.performAsync { [weak self] in
+            guard let pjCallId = self?.reverseCallMap[callId] else { return }
             var digits = pj_str_from_swift(digit)
             pjsua_call_dial_dtmf(pjCallId, &digits)
         }
     }
 
     func transferCall(callId: String, target: String) {
-        guard let pjCallId = reverseCallMap[callId] else { return }
-
-        pjThread.performAsync {
+        pjThread.performAsync { [weak self] in
+            guard let pjCallId = self?.reverseCallMap[callId] else { return }
             var dest = pj_str_from_swift(target)
             pjsua_call_xfer(pjCallId, &dest, nil)
         }
