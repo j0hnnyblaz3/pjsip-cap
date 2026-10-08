@@ -398,7 +398,9 @@ Java_com_redyrect_pjsip_PjsipNative_destroy(JNIEnv *env, jclass cls) {
 
 JNIEXPORT jint JNICALL
 Java_com_redyrect_pjsip_PjsipNative_makeCall(JNIEnv *env, jclass cls, jstring juri) {
-    if (g_acc_id == PJSUA_INVALID_ID) return -1;
+    /* Failure returns the negated pj_status_t, so Kotlin can ask statusText
+     * for PJSIP's own reason. */
+    if (g_acc_id == PJSUA_INVALID_ID) return -PJ_EINVALIDOP;
 
     const char *uri = (*env)->GetStringUTFChars(env, juri, NULL);
     pj_str_t pj_uri = pj_str((char*)uri);
@@ -409,9 +411,17 @@ Java_com_redyrect_pjsip_PjsipNative_makeCall(JNIEnv *env, jclass cls, jstring ju
 
     if (status != PJ_SUCCESS) {
         LOGE("pjsua_call_make_call failed: %d", status);
-        return -1;
+        return -status;
     }
     return call_id;
+}
+
+/* PJSIP's description of a pj_status_t ("Invalid Request URI", ...). */
+JNIEXPORT jstring JNICALL
+Java_com_redyrect_pjsip_PjsipNative_statusText(JNIEnv *env, jclass cls, jint status) {
+    char buf[160];
+    pj_strerror((pj_status_t)status, buf, sizeof(buf));
+    return (*env)->NewStringUTF(env, buf);
 }
 
 JNIEXPORT jint JNICALL

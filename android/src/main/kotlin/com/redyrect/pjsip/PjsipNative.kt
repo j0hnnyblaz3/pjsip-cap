@@ -29,7 +29,10 @@ object PjsipNative {
     @JvmStatic external fun removeAccount()
     @JvmStatic external fun destroy()
 
+    /** The pjsua call id, or the negated pj_status_t on failure. */
     @JvmStatic external fun makeCall(uri: String): Int
+    /** PJSIP's description of a pj_status_t. */
+    @JvmStatic external fun statusText(status: Int): String
     @JvmStatic external fun answerCall(callId: Int, code: Int): Int
     @JvmStatic external fun hangupCall(callId: Int)
     @JvmStatic external fun setHold(callId: Int)

@@ -854,18 +854,26 @@ class SipManager: NSObject {
 
     // MARK: - Calls
 
-    func makeCall(uri: String) -> String? {
-        guard accountId != -1 else { return nil }
+    /// Place a call. Throws with PJSIP's own reason ("Invalid Request
+    /// URI", …) so the app can say why, instead of a bare failure.
+    func makeCall(uri: String) throws -> String {
+        guard accountId != -1 else {
+            throw NSError(domain: "PjsipPlugin", code: -1,
+                          userInfo: [NSLocalizedDescriptionKey: "Not registered: the phone has no SIP account yet"])
+        }
 
         var resultCallId: String? = nil
+        var failure: NSError? = nil
 
         pjThread.performSync { [self] in
             var pjUri = pj_str_from_swift(uri)
+            defer { free(pjUri.ptr) }
             var pjCallId: pjsua_call_id = -1
 
             let status = pjsua_call_make_call(accountId, &pjUri, nil, nil, nil, &pjCallId)
             guard status == Int32(PJ_SUCCESS.rawValue) else {
-                pjsipLog("[SipManager] makeCall failed: \(status)")
+                failure = sipError("Cannot call \(uri)", status: status)
+                pjsipLog("[SipManager] makeCall failed: \(failure!.localizedDescription)")
                 return
             }
 
@@ -875,10 +883,13 @@ class SipManager: NSObject {
             resultCallId = pluginId(for: pjCallId)
         }
 
-        if let callId = resultCallId {
-            delegate?.onCallStateChanged(callId: callId, state: "calling", remoteUri: uri)
+        if let failure = failure { throw failure }
+        guard let callId = resultCallId else {
+            throw NSError(domain: "PjsipPlugin", code: -1,
+                          userInfo: [NSLocalizedDescriptionKey: "Cannot call \(uri): PJSIP returned no call"])
         }
-        return resultCallId
+        delegate?.onCallStateChanged(callId: callId, state: "calling", remoteUri: uri)
+        return callId
     }
 
     // The call maps and the pending-push sets are touched only on pjThread,

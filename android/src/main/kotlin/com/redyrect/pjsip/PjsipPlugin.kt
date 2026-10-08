@@ -122,11 +122,11 @@ class PjsipPlugin : Plugin() {
     private fun performMakeCall(call: PluginCall) {
         val uri = call.getString("uri") ?: return call.reject("Missing uri")
 
-        val callId = CallController.makeCall(uri)
-        if (callId != null) {
+        try {
+            val callId = CallController.makeCall(uri)
             call.resolve(JSObject().apply { put("callId", callId) })
-        } else {
-            call.reject("Failed to make call")
+        } catch (e: Exception) {
+            call.reject(e.message ?: "Cannot place the call")
         }
     }
 

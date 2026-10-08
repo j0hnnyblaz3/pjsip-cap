@@ -99,10 +99,11 @@ public class PjsipPlugin: CAPPlugin, CAPBridgedPlugin {
         // identity, which is nonsense to a human.
         let displayName = call.getString("displayName")
 
-        if let callId = calls.makeCall(uri: uri, displayName: displayName) {
+        do {
+            let callId = try calls.makeCall(uri: uri, displayName: displayName)
             call.resolve(["callId": callId])
-        } else {
-            call.reject("Failed to make call")
+        } catch {
+            call.reject(error.localizedDescription)
         }
     }
 

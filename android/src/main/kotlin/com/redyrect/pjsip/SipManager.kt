@@ -211,30 +211,33 @@ class SipManager(private val context: Context) {
 
     // Calls
 
-    fun makeCall(uri: String): String? {
-        if (!pjsuaStarted) return null
+    /** Place a call. Throws with PJSIP's own reason ("Invalid Request
+     *  URI", …) so the app can say why, instead of a bare failure. */
+    fun makeCall(uri: String): String {
+        if (!pjsuaStarted) throw IllegalStateException("Not registered: the phone has no SIP account yet")
 
+        var result = 0
         var resultCallId: String? = null
         val latch = java.util.concurrent.CountDownLatch(1)
 
         pjHandler.post {
-            val pjCallId = PjsipNative.makeCall(uri)
-            if (pjCallId >= 0) {
+            result = PjsipNative.makeCall(uri)
+            if (result >= 0) {
                 // Same reason as the callbacks: pjsip can report state for
                 // this call before makeCall returns, so allocating a fresh id
                 // here would create a second identity for one call.
-                resultCallId = pluginIdFor(pjCallId)
+                resultCallId = pluginIdFor(result)
             }
             latch.countDown()
         }
 
         latch.await()
 
-        resultCallId?.let {
-            activeCalls[it] = ActiveCallSnapshot("calling", uri, null)
-            listener?.onCallStateChanged(it, "calling", uri)
-        }
-        return resultCallId
+        val callId = resultCallId
+            ?: throw IllegalStateException("Cannot call $uri: ${PjsipNative.statusText(-result)}")
+        activeCalls[callId] = ActiveCallSnapshot("calling", uri, null)
+        listener?.onCallStateChanged(callId, "calling", uri)
+        return callId
     }
 
     /** Snapshot every call still being tracked, for client-side

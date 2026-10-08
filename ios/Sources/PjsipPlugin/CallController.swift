@@ -57,8 +57,8 @@ final class CallController: NSObject {
 
     /// Place a call and report it to CallKit. `displayName` is what CallKit
     /// shows instead of the raw SIP URI.
-    func makeCall(uri: String, displayName: String?) -> String? {
-        guard let callId = sip.makeCall(uri: uri) else { return nil }
+    func makeCall(uri: String, displayName: String?) throws -> String {
+        let callId = try sip.makeCall(uri: uri)
         callKit.reportOutgoingCall(callId: callId, handle: uri, callerName: displayName)
         return callId
     }

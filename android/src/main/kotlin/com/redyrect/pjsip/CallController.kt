@@ -70,8 +70,8 @@ object CallController {
     // Calls
 
     /** Place a call and report it to Telecom. */
-    fun makeCall(uri: String): String? {
-        val callId = sip().makeCall(uri) ?: return null
+    fun makeCall(uri: String): String {
+        val callId = sip().makeCall(uri)
         reportToTelecom(callId) { telecom, handle ->
             telecom.placeCall(telecomAddress(uri), Bundle().apply {
                 putString("callId", callId)
