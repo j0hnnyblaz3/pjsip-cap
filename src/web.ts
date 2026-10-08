@@ -239,14 +239,26 @@ export class PjsipWeb extends WebPlugin implements PjsipPlugin {
   }
 
   async answerCall(options: { callId: string }): Promise<void> {
-    const session = this.getSession(options.callId);
-    if (session instanceof Object && 'accept' in session) {
-      await (session as Invitation).accept({
+    const { callId } = options;
+    const session = this.getSession(callId);
+    if (!(session instanceof Invitation)) {
+      throw new Error(`Call ${callId} is not an incoming call; it cannot be answered`);
+    }
+    // accept() takes the microphone, builds the answer SDP and sends the
+    // 200 OK; until it resolves the PBX still sees this device ringing. Each
+    // step is logged so a call that "did not connect" shows where it stopped.
+    console.info(`[capacitor-pjsip] answer ${callId}: taking the microphone and sending 200 OK`);
+    try {
+      await session.accept({
         sessionDescriptionHandlerOptions: {
           constraints: { audio: true, video: false },
         },
       });
+    } catch (err) {
+      console.error(`[capacitor-pjsip] answer ${callId} failed`, err);
+      throw err;
     }
+    console.info(`[capacitor-pjsip] answer ${callId}: 200 OK sent`);
   }
 
   async hangupCall(options: { callId: string }): Promise<void> {

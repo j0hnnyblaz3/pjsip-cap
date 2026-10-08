@@ -45,6 +45,18 @@ class SipManager(private val context: Context) {
     var registrationState: String = "unregistered"
         private set
 
+    /** The one way registration state changes: stored and reported
+     *  together, on the main thread, so `registrationState` can never
+     *  contradict the last event. */
+    private fun setRegistrationState(state: String, reason: String? = null) {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            mainHandler.post { setRegistrationState(state, reason) }
+            return
+        }
+        registrationState = state
+        listener?.onRegistrationStateChanged(state, reason)
+    }
+
     private var config: SipConfig? = null
 
     /** Maps pjsua call_id (Int) -> plugin callId string */
@@ -92,10 +104,7 @@ class SipManager(private val context: Context) {
     /** JNI callback — invoked from native PJSIP threads */
     private val nativeCallback = object : PjsipNative.Callback {
         override fun onRegState(state: String, reason: String?) {
-            mainHandler.post {
-                registrationState = state
-                listener?.onRegistrationStateChanged(state, reason)
-            }
+            setRegistrationState(state, reason)
         }
 
         override fun onIncomingCall(pjCallId: Int, remoteUri: String) {
@@ -139,7 +148,7 @@ class SipManager(private val context: Context) {
 
     fun register(config: SipConfig, callback: (Exception?) -> Unit) {
         this.config = config
-        listener?.onRegistrationStateChanged("registering", null)
+        setRegistrationState("registering")
 
         pjHandler.post {
             try {
@@ -175,8 +184,7 @@ class SipManager(private val context: Context) {
                 mainHandler.post { callback(null) }
             } catch (e: Exception) {
                 mainHandler.post {
-                    registrationState = "failed"
-                    listener?.onRegistrationStateChanged("failed", e.message)
+                    setRegistrationState("failed", e.message)
                     callback(e)
                 }
             }
@@ -192,11 +200,10 @@ class SipManager(private val context: Context) {
             }
 
             mainHandler.post {
-                registrationState = "unregistered"
                 callMap.clear()
                 reverseCallMap.clear()
                 activeCalls.clear()
-                listener?.onRegistrationStateChanged("unregistered", null)
+                setRegistrationState("unregistered")
                 callback(null)
             }
         }

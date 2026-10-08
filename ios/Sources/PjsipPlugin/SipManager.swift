@@ -121,6 +121,19 @@ class SipManager: NSObject {
     weak var delegate: SipManagerDelegate?
 
     private(set) var registrationState: String = "unregistered"
+
+    /// The one way registration state changes: stored and reported
+    /// together, on the main thread, so `getRegistrationState` can never
+    /// contradict the last event (it answered "unregistered" while a
+    /// REGISTER was in flight, and the app marked the phone failed).
+    private func setRegistrationState(_ state: String, reason: String? = nil) {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { self.setRegistrationState(state, reason: reason) }
+            return
+        }
+        registrationState = state
+        delegate?.onRegistrationStateChanged(state: state, reason: reason)
+    }
     private var config: SipConfig?
 
     /// Maps pjsua_call_id (Int32) -> plugin callId string
@@ -323,7 +336,7 @@ class SipManager: NSObject {
     func register(config: SipConfig, completion: @escaping (Error?) -> Void) {
         self.config = config
 
-        delegate?.onRegistrationStateChanged(state: "registering", reason: nil)
+        setRegistrationState("registering")
 
         pjThread.performAsync { [weak self] in
             guard let self = self else { return }
@@ -335,8 +348,7 @@ class SipManager: NSObject {
                 try self.addAccount(config: config)
             } catch {
                 DispatchQueue.main.async {
-                    self.registrationState = "failed"
-                    self.delegate?.onRegistrationStateChanged(state: "failed", reason: error.localizedDescription)
+                    self.setRegistrationState("failed", reason: error.localizedDescription)
                     completion(error)
                 }
                 return
@@ -523,10 +535,9 @@ class SipManager: NSObject {
             self.lastForceRegisterAt = nil
 
             DispatchQueue.main.async {
-                self.registrationState = "unregistered"
                 self.callMap.removeAll()
                 self.reverseCallMap.removeAll()
-                self.delegate?.onRegistrationStateChanged(state: "unregistered", reason: nil)
+                self.setRegistrationState("unregistered")
                 completion(nil)
             }
         }
@@ -1108,10 +1119,7 @@ class SipManager: NSObject {
             reason = "SIP \(code)"
         }
 
-        DispatchQueue.main.async { [weak self] in
-            self?.registrationState = state
-            self?.delegate?.onRegistrationStateChanged(state: state, reason: reason)
-        }
+        setRegistrationState(state, reason: reason)
     }
 
     func handleIncomingCall(accountId: pjsua_acc_id, pjCallId: pjsua_call_id, rdata: UnsafeMutablePointer<pjsip_rx_data>?) {
