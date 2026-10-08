@@ -66,7 +66,7 @@ extension PushManager: PKPushRegistryDelegate {
 
         let token = pushCredentials.token.map { String(format: "%02x", $0) }.joined()
         let env = currentApnsEnvironment()
-        print("[PushManager] VoIP push token: \(token) (env: \(env))")
+        pjsipLog("[PushManager] VoIP push token: \(token) (env: \(env))")
         delegate?.pushManagerDidUpdatePushToken(token: token, environment: env)
     }
 
@@ -83,7 +83,7 @@ extension PushManager: PKPushRegistryDelegate {
         // they happen instead of waiting for "call_uuid missing" silent
         // fallbacks downstream.
         let pairs = data.map { "\($0.key)=\($0.value)" }.sorted().joined(separator: " | ")
-        print("[PushManager] VoIP push received | \(pairs)")
+        pjsipLog("[PushManager] VoIP push received | \(pairs)")
 
         // Extract call info from the push payload. The PBX sends:
         //   {
@@ -106,7 +106,7 @@ extension PushManager: PKPushRegistryDelegate {
         // STEP 1: Report to CallKit IMMEDIATELY — this MUST happen before completion()
         // This is the strict iOS 13+ requirement.
         guard let callKit = callKitManager else {
-            print("[PushManager] ERROR: CallKitManager not set — cannot report incoming call!")
+            pjsipLog("[PushManager] ERROR: CallKitManager not set — cannot report incoming call!")
             // Still must report something or iOS kills us. Report and immediately end.
             let fallbackKit = CallKitManager()
             fallbackKit.reportIncomingCall(callId: callId, handle: handle, callerName: callerName)
@@ -134,7 +134,7 @@ extension PushManager: PKPushRegistryDelegate {
 
         if isDuplicate {
             let dtMs = Int(now.timeIntervalSince(lastPushTimeByCaller[dedupKey] ?? now) * 1000)
-            print("[PushManager] dedup: duplicate push from '\(dedupKey)' within \(Int(Self.DEDUP_WINDOW * 1000))ms (Δ=\(dtMs)ms) — reported + immediately ended, delegate skipped")
+            pjsipLog("[PushManager] dedup: duplicate push from '\(dedupKey)' within \(Int(Self.DEDUP_WINDOW * 1000))ms (Δ=\(dtMs)ms) — reported + immediately ended, delegate skipped")
             callKit.reportCallEnded(callId: callId)
             completion()
             return
@@ -150,6 +150,6 @@ extension PushManager: PKPushRegistryDelegate {
     }
 
     func pushRegistry(_ registry: PKPushRegistry, didInvalidatePushTokenFor type: PKPushType) {
-        print("[PushManager] Push token invalidated for type: \(type)")
+        pjsipLog("[PushManager] Push token invalidated for type: \(type)")
     }
 }

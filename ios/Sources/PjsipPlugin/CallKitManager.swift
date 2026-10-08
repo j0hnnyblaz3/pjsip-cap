@@ -88,7 +88,7 @@ class CallKitManager: NSObject {
         update.supportsDTMF = true
 
         if let existingUuid = reverseCallMap[callId] {
-            print("[CallKitManager] reportIncomingCall: \(callId) already known — updating CXCall in place")
+            pjsipLog("[CallKitManager] reportIncomingCall: \(callId) already known — updating CXCall in place")
             provider.reportCall(with: existingUuid, updated: update)
             return
         }
@@ -99,7 +99,7 @@ class CallKitManager: NSObject {
 
         provider.reportNewIncomingCall(with: uuid, update: update) { error in
             if let error = error {
-                print("[CallKitManager] Report incoming call error: \(error)")
+                pjsipLog("[CallKitManager] Report incoming call error: \(error)")
                 self.callMap.removeValue(forKey: uuid)
                 self.reverseCallMap.removeValue(forKey: callId)
             }
@@ -142,7 +142,7 @@ class CallKitManager: NSObject {
         callController.request(transaction) { [weak self] error in
             guard let self = self else { return }
             if let error = error {
-                print("[CallKitManager] Start call error: \(error)")
+                pjsipLog("[CallKitManager] Start call error: \(error)")
                 return
             }
             self.provider.reportOutgoingCall(with: uuid, startedConnectingAt: nil)
@@ -366,7 +366,7 @@ extension CallKitManager: CXProviderDelegate {
         // status 561017449 on every sample rate because the session
         // isn't active when it tries to open the device. Calls reach
         // "confirmed" but no audio flows.
-        print("[CallKitManager] AVAudioSession activated by CallKit — attaching PJSIP sound device")
+        pjsipLog("[CallKitManager] AVAudioSession activated by CallKit — attaching PJSIP sound device")
         SipManager.shared.startAudioDevice()
     }
 
@@ -374,7 +374,7 @@ extension CallKitManager: CXProviderDelegate {
         // Detach PJSIP from the device so it doesn't keep AURemoteIO
         // alive when CallKit has released the session. Signaling
         // (REGISTER, INVITE) continues independently.
-        print("[CallKitManager] AVAudioSession deactivated by CallKit — detaching PJSIP sound device")
+        pjsipLog("[CallKitManager] AVAudioSession deactivated by CallKit — detaching PJSIP sound device")
         SipManager.shared.stopAudioDevice()
     }
 
@@ -401,7 +401,7 @@ extension CallKitManager: CXProviderDelegate {
                 options: [.allowBluetooth, .allowBluetoothA2DP, .duckOthers]
             )
         } catch {
-            print("[CallKitManager] Audio session category error: \(error)")
+            pjsipLog("[CallKitManager] Audio session category error: \(error)")
         }
     }
 }

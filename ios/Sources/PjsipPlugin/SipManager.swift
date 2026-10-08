@@ -9,14 +9,7 @@ import PjsipSDK
 /// media negotiation, during hold, etc). Those lines have zero
 /// diagnostic value and bury everything else in the log.
 ///
-/// Kept lines are re-emitted via `NSLog`. We tried both
-/// `fputs(stderr)` and Swift `print()` first — both got silently
-/// dropped depending on which thread PJSIP called us from (the
-/// pjsip-worker thread's stdout/stderr aren't routed to the same
-/// destination iOS's unified logging is). NSLog goes through the
-/// unified logging system, which Capacitor, idevicesyslog, and
-/// Console.app all reliably surface. Cost is a duplicated
-/// timestamp prefix on every line, which is a small price.
+/// Kept lines go through `pjsipLog`, the plugin's one log function.
 ///
 /// Must be a free function with @convention(c) — PJSIP takes a raw
 /// C function pointer.
@@ -27,9 +20,9 @@ private let pjsipFilteredLogWriter: @convention(c) (Int32, UnsafePointer<CChar>?
         && msg.contains("Underflow") {
         return
     }
-    // Strip PJSIP's trailing newline — NSLog adds its own line break.
+    // Strip PJSIP's trailing newline — pjsipLog adds its own.
     let trimmed = msg.hasSuffix("\n") ? String(msg.dropLast()) : msg
-    NSLog("%@", trimmed as NSString)
+    pjsipLog(trimmed)
 }
 
 struct SipConfig {
@@ -308,7 +301,7 @@ class SipManager: NSObject {
             // pathUpdate even when only metadata changed).
             if previous == signature { return }
 
-            print("[SipManager] network path changed: \(previous!) → \(signature)")
+            pjsipLog("[SipManager] network path changed: \(previous!) → \(signature)")
 
             // Only re-register when we actually have connectivity.
             // .unsatisfied means we're offline — the next .satisfied
@@ -377,16 +370,16 @@ class SipManager: NSObject {
             if let last = self.lastForceRegisterAt,
                now.timeIntervalSince(last) < Self.FORCE_REGISTER_DEBOUNCE_SEC {
                 let dtMs = Int(now.timeIntervalSince(last) * 1000)
-                print("[SipManager] forceRegister: debounced (last \(dtMs)ms ago, window \(Int(Self.FORCE_REGISTER_DEBOUNCE_SEC * 1000))ms)")
+                pjsipLog("[SipManager] forceRegister: debounced (last \(dtMs)ms ago, window \(Int(Self.FORCE_REGISTER_DEBOUNCE_SEC * 1000))ms)")
                 return
             }
             self.lastForceRegisterAt = now
-            print("[SipManager] forceRegister: state=\(self.registrationState) "
+            pjsipLog("[SipManager] forceRegister: state=\(self.registrationState) "
                 + "accountId=\(self.accountId) transportId=\(self.transportId) "
                 + "transportType=\(self.transportType.rawValue) "
                 + "server=\(self.config?.server ?? "<nil>"):\(self.config?.port ?? -1)")
             guard self.accountId != -1 else {
-                print("[SipManager] forceRegister: no account — skipping (call setup will hit Call not found)")
+                pjsipLog("[SipManager] forceRegister: no account — skipping (call setup will hit Call not found)")
                 return
             }
             let status = pjsua_acc_set_registration(
@@ -394,9 +387,9 @@ class SipManager: NSObject {
                 pj_bool_t(PJ_TRUE.rawValue)
             )
             if status == Int32(PJ_SUCCESS.rawValue) {
-                print("[SipManager] forceRegister: pjsua_acc_set_registration ok")
+                pjsipLog("[SipManager] forceRegister: pjsua_acc_set_registration ok")
             } else {
-                print("[SipManager] forceRegister failed status=\(status)")
+                pjsipLog("[SipManager] forceRegister failed status=\(status)")
             }
         }
     }
@@ -421,7 +414,7 @@ class SipManager: NSObject {
             // "INVITE never arrived" failures. If accountId == -1
             // we haven't registered yet — the PBX has no contact
             // to send to and this call will fail.
-            print("[SipManager] expectIncomingCall: callUuid=\(callUuid) "
+            pjsipLog("[SipManager] expectIncomingCall: callUuid=\(callUuid) "
                 + "regState=\(self.registrationState) accountId=\(self.accountId) "
                 + "activeCalls=\(self.reverseCallMap.count) "
                 + "pendingPushSet=\(self.pendingCallUuidsOrder)")
@@ -447,7 +440,7 @@ class SipManager: NSObject {
             // so an evicted-with-held-completion case still shows up
             // in the logs the same way a graceful expiry does.
             failPendingAnswer(callUuid: evicted, reason: "evicted by push-storm cap")
-            print("[SipManager] addPendingCallUuid: evicted \(evicted) (cap=\(Self.MAX_PENDING_PUSHES) reached)")
+            pjsipLog("[SipManager] addPendingCallUuid: evicted \(evicted) (cap=\(Self.MAX_PENDING_PUSHES) reached)")
         }
     }
 
@@ -482,7 +475,7 @@ class SipManager: NSObject {
         // 0 here, PJSIP never received a single SIP message on this
         // dialog — the issue is upstream of pjsua (PBX bridge picked
         // the wrong contact, INVITE lost in transit, etc).
-        print("[SipManager] failPendingAnswer: callUuid=\(callUuid) reason=\(reason) "
+        pjsipLog("[SipManager] failPendingAnswer: callUuid=\(callUuid) reason=\(reason) "
             + "regState=\(registrationState) accountId=\(accountId) "
             + "activeCalls=\(reverseCallMap.count) "
             + "pendingPushSet=\(pendingCallUuids.sorted()) "
@@ -652,7 +645,7 @@ class SipManager: NSObject {
         // than a status code — discarding it is fine; the side
         // effect we want is detaching from coreaudio.
         _ = pjsua_set_no_snd_dev()
-        print("[SipManager] startPjsua: detached sound device")
+        pjsipLog("[SipManager] startPjsua: detached sound device")
 
         // After pjsua_start, the codec subsystem is initialized and we
         // can enumerate + reprioritize. Without this, PJSIP offers its
@@ -683,14 +676,14 @@ class SipManager: NSObject {
         var codecs = Array(repeating: pjsua_codec_info(), count: 64)
         let enumStatus = pjsua_enum_codecs(&codecs, &codecCount)
         guard enumStatus == Int32(PJ_SUCCESS.rawValue) else {
-            print("[SipManager] pjsua_enum_codecs failed status=\(enumStatus)")
+            pjsipLog("[SipManager] pjsua_enum_codecs failed status=\(enumStatus)")
             return
         }
 
-        print("[SipManager] PJSIP compiled-in codecs (\(codecCount)):")
+        pjsipLog("[SipManager] PJSIP compiled-in codecs (\(codecCount)):")
         for i in 0..<Int(codecCount) {
             let id = pjStringToSwift(codecs[i].codec_id)
-            print("  - \(id) (default priority=\(codecs[i].priority))")
+            pjsipLog("  - \(id) (default priority=\(codecs[i].priority))")
         }
 
         // Apply priorities. Codec IDs are case-sensitive in pjsua —
@@ -712,7 +705,7 @@ class SipManager: NSObject {
             var id = codecs[i].codec_id
             let status = pjsua_codec_set_priority(&id, 0)
             if status != Int32(PJ_SUCCESS.rawValue) {
-                print("[SipManager] disable codec failed for \(pjStringToSwift(id)) status=\(status)")
+                pjsipLog("[SipManager] disable codec failed for \(pjStringToSwift(id)) status=\(status)")
             }
         }
 
@@ -721,11 +714,11 @@ class SipManager: NSObject {
             var id = pj_str_from_swift(name)
             let status = pjsua_codec_set_priority(&id, prio)
             if status == Int32(PJ_SUCCESS.rawValue) {
-                print("[SipManager] codec enabled: \(name) priority=\(prio)")
+                pjsipLog("[SipManager] codec enabled: \(name) priority=\(prio)")
             } else {
                 // Not a hard failure — the codec may not be compiled
                 // into this PJSIP build. e.g. opus is conditional.
-                print("[SipManager] codec \(name) not available (status=\(status))")
+                pjsipLog("[SipManager] codec \(name) not available (status=\(status))")
             }
         }
     }
@@ -743,7 +736,7 @@ class SipManager: NSObject {
                 pj_bool_t(PJ_TRUE.rawValue)
             )
             if status != Int32(PJ_SUCCESS.rawValue) {
-                print("[SipManager] addAccount: re-register failed status=\(status)")
+                pjsipLog("[SipManager] addAccount: re-register failed status=\(status)")
             }
             return
         }
@@ -808,7 +801,7 @@ class SipManager: NSObject {
                 accCfg.use_srtp = PJMEDIA_SRTP_MANDATORY
                 accCfg.srtp_secure_signaling = 0
             default:
-                print("[SipManager] unknown srtpPolicy '\(policy)' — leaving pjsua default")
+                pjsipLog("[SipManager] unknown srtpPolicy '\(policy)' — leaving pjsua default")
             }
         }
 
@@ -861,7 +854,7 @@ class SipManager: NSObject {
 
             let status = pjsua_call_make_call(accountId, &pjUri, nil, nil, nil, &pjCallId)
             guard status == Int32(PJ_SUCCESS.rawValue) else {
-                print("[SipManager] makeCall failed: \(status)")
+                pjsipLog("[SipManager] makeCall failed: \(status)")
                 return
             }
 
@@ -913,7 +906,7 @@ class SipManager: NSObject {
                 if let completion = completion {
                     self.pendingAnswerCompletions[callId] = completion
                 }
-                print("[SipManager] answerCall: \(callId) pending INVITE — answer budget armed")
+                pjsipLog("[SipManager] answerCall: \(callId) pending INVITE — answer budget armed")
 
                 // Re-arm semantics: cancel any prior budget for the same
                 // UUID (CallKit gives a single CXAnswerCallAction per call,
@@ -958,12 +951,12 @@ class SipManager: NSObject {
             if let pjCallId = self.reverseCallMap[callId] {
                 let status = pjsua_call_hangup(pjCallId, 0, nil, nil)
                 if status == Int32(PJ_SUCCESS.rawValue) {
-                    print("[SipManager] hangupCall: BYE queued for pjCallId=\(pjCallId) (callId=\(callId))")
+                    pjsipLog("[SipManager] hangupCall: BYE queued for pjCallId=\(pjCallId) (callId=\(callId))")
                 } else {
                     // BYE couldn't be queued — force the local cleanup so
                     // the UI doesn't stay stuck. The remote times the dialog
                     // out on its own.
-                    print("[SipManager] hangupCall: pjsua_call_hangup failed status=\(status) (callId=\(callId))")
+                    pjsipLog("[SipManager] hangupCall: pjsua_call_hangup failed status=\(status) (callId=\(callId))")
                     self.callMap.removeValue(forKey: pjCallId)
                     self.reverseCallMap.removeValue(forKey: callId)
                     DispatchQueue.main.async {
@@ -1043,9 +1036,9 @@ class SipManager: NSObject {
                 PJMEDIA_AUD_DEFAULT_PLAYBACK_DEV
             )
             if status == Int32(PJ_SUCCESS.rawValue) {
-                print("[SipManager] startAudioDevice: attached")
+                pjsipLog("[SipManager] startAudioDevice: attached")
             } else {
-                print("[SipManager] startAudioDevice failed status=\(status)")
+                pjsipLog("[SipManager] startAudioDevice failed status=\(status)")
             }
         }
     }
@@ -1062,7 +1055,7 @@ class SipManager: NSObject {
         pjThread.performAsync { [weak self] in
             guard let self = self, self.pjsuaStarted else { return }
             _ = pjsua_set_no_snd_dev()
-            print("[SipManager] stopAudioDevice: detached")
+            pjsipLog("[SipManager] stopAudioDevice: detached")
         }
     }
 
@@ -1093,7 +1086,7 @@ class SipManager: NSObject {
                 break
             }
         } catch {
-            print("[SipManager] Audio route error: \(error)")
+            pjsipLog("[SipManager] Audio route error: \(error)")
         }
     }
 
@@ -1129,7 +1122,7 @@ class SipManager: NSObject {
         // INVITE actually arrived; if it doesn't, the PBX never sent
         // one (or it was lost upstream of pjsua).
         let headerUuid = parseRedyrectCallUuid(rdata: rdata)
-        print("[SipManager] handleIncomingCall: pjCallId=\(pjCallId) "
+        pjsipLog("[SipManager] handleIncomingCall: pjCallId=\(pjCallId) "
             + "X-Redyrect-Call-UUID=\(headerUuid ?? "<not present>") "
             + "pendingPushSet=\(pendingCallUuids.sorted()) "
             + "pendingAnswerSet=\(pendingAnswerCallUuids.sorted())")
@@ -1144,11 +1137,11 @@ class SipManager: NSObject {
         if let uuid = headerUuid {
             let wasPending = pendingCallUuids.contains(uuid)
             removePendingCallUuid(uuid)
-            print("[SipManager] handleIncomingCall: bridged to push placeholder=\(wasPending) pluginCallId=\(uuid)")
+            pjsipLog("[SipManager] handleIncomingCall: bridged to push placeholder=\(wasPending) pluginCallId=\(uuid)")
         }
         let pluginCallId = pluginId(for: pjCallId, preferred: headerUuid)
         if headerUuid == nil {
-            print("[SipManager] handleIncomingCall: pluginCallId=\(pluginCallId) (foreground inbound, no push correlation)")
+            pjsipLog("[SipManager] handleIncomingCall: pluginCallId=\(pluginCallId) (foreground inbound, no push correlation)")
         }
 
         // Extract remote URI and caller name from call info
@@ -1175,7 +1168,7 @@ class SipManager: NSObject {
             cancelAnswerTimer(callUuid: pluginCallId)
             let status = pjsua_call_answer(pjCallId, 200, nil, nil)
             let answeredOk = (status == Int32(PJ_SUCCESS.rawValue))
-            print("[SipManager] auto-answered pending \(pluginCallId) status=\(status)")
+            pjsipLog("[SipManager] auto-answered pending \(pluginCallId) status=\(status)")
             if let completion = pendingAnswerCompletions.removeValue(forKey: pluginCallId) {
                 DispatchQueue.main.async { [weak self] in
                     if answeredOk {
@@ -1235,7 +1228,7 @@ class SipManager: NSObject {
         let state = info.map { effectiveCallState(info: $0) } ?? "disconnected"
         let remoteUri = info.map { pjStringToSwift($0.remote_info) }
         if info == nil {
-            NSLog("[Pjsip] call \(pjCallId): get_info failed — reporting disconnected")
+            pjsipLog("[Pjsip] call \(pjCallId): get_info failed — reporting disconnected")
         }
 
         if state == "disconnected" {
@@ -1285,17 +1278,17 @@ class SipManager: NSObject {
         case PJSUA_CALL_MEDIA_ACTIVE:
             pjsua_conf_connect(info.conf_slot, 0)  // call -> speaker
             pjsua_conf_connect(0, info.conf_slot)  // mic  -> call
-            print("[SipManager] handleCallMediaState: pjCallId=\(pjCallId) ACTIVE — bridges connected (slot=\(info.conf_slot))")
+            pjsipLog("[SipManager] handleCallMediaState: pjCallId=\(pjCallId) ACTIVE — bridges connected (slot=\(info.conf_slot))")
         case PJSUA_CALL_MEDIA_LOCAL_HOLD,
              PJSUA_CALL_MEDIA_REMOTE_HOLD:
             pjsua_conf_disconnect(info.conf_slot, 0)
             pjsua_conf_disconnect(0, info.conf_slot)
-            print("[SipManager] handleCallMediaState: pjCallId=\(pjCallId) HOLD — bridges disconnected (slot=\(info.conf_slot))")
+            pjsipLog("[SipManager] handleCallMediaState: pjCallId=\(pjCallId) HOLD — bridges disconnected (slot=\(info.conf_slot))")
         case PJSUA_CALL_MEDIA_NONE,
              PJSUA_CALL_MEDIA_ERROR:
             pjsua_conf_disconnect(info.conf_slot, 0)
             pjsua_conf_disconnect(0, info.conf_slot)
-            print("[SipManager] handleCallMediaState: pjCallId=\(pjCallId) NONE/ERROR — bridges disconnected")
+            pjsipLog("[SipManager] handleCallMediaState: pjCallId=\(pjCallId) NONE/ERROR — bridges disconnected")
         default:
             break
         }
@@ -1383,7 +1376,7 @@ class SipManager: NSObject {
         // still-up would strand the call; disconnected is the safe terminal
         // answer and is logged so it can't pass unnoticed.
         default:
-            NSLog("[Pjsip] unmapped inv_state \(info.state.rawValue) — reporting disconnected")
+            pjsipLog("[Pjsip] unmapped inv_state \(info.state.rawValue) — reporting disconnected")
             return "disconnected"
         }
     }
