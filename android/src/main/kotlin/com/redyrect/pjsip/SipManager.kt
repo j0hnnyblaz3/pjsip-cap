@@ -104,7 +104,12 @@ class SipManager(private val context: Context) {
      *  carried — replacing one a state event may have allocated first. */
     @Synchronized
     private fun bindPluginId(pjCallId: Int, id: String): String {
-        callMap[pjCallId]?.let { old -> if (old != id) reverseCallMap.remove(old) }
+        callMap[pjCallId]?.let { old ->
+            if (old != id) {
+                reverseCallMap.remove(old)
+                activeCalls.remove(old)?.let { activeCalls[id] = it }
+            }
+        }
         callMap[pjCallId] = id
         reverseCallMap[id] = pjCallId
         return id
@@ -325,7 +330,10 @@ class SipManager(private val context: Context) {
     }
 
     fun hangupCall(callId: String) {
-        val pjCallId = reverseCallMap[callId] ?: return
+        val pjCallId = reverseCallMap[callId] ?: run {
+            pjsipLog("[SipManager] hangup $callId: no SIP call by that id — nothing was ended")
+            return
+        }
         pjHandler.post { PjsipNative.hangupCall(pjCallId) }
         callMap.remove(pjCallId)
         reverseCallMap.remove(callId)

@@ -115,9 +115,6 @@ static void on_reg_state2(pjsua_acc_id acc_id, pjsua_reg_info *info) {
 
 static void on_incoming_call(pjsua_acc_id acc_id, pjsua_call_id call_id,
                              pjsip_rx_data *rdata) {
-    /* Auto-ring 180 */
-    pjsua_call_answer(call_id, 180, NULL, NULL);
-
     pjsua_call_info ci;
     pjsua_call_get_info(call_id, &ci);
 
@@ -155,6 +152,10 @@ static void on_incoming_call(pjsua_acc_id acc_id, pjsua_call_id call_id,
     (*env)->DeleteLocalRef(env, jremote);
     (*env)->DeleteLocalRef(env, juuid);
     release_env(need_detach);
+
+    /* Ring only after Kotlin knows the call: the 180 fires a state change,
+     * and one arriving first gave the call a second, made-up id. */
+    pjsua_call_answer(call_id, 180, NULL, NULL);
 }
 
 static void on_call_state(pjsua_call_id call_id, pjsip_event *e) {

@@ -23,11 +23,6 @@ import com.google.firebase.messaging.FirebaseMessaging
             strings = [Manifest.permission.RECORD_AUDIO],
             alias = "microphone",
         ),
-        // Android 13+: without it an incoming call rings in Telecom with nothing on screen.
-        Permission(
-            strings = [Manifest.permission.POST_NOTIFICATIONS],
-            alias = "notifications",
-        ),
     ],
 )
 class PjsipPlugin : Plugin() {
@@ -53,6 +48,24 @@ class PjsipPlugin : Plugin() {
             }
         }
     }
+
+    // Permissions: the microphone, the one this plugin owns. Same contract as
+    // iOS — `requestPermissions({ microphone })` resolves with
+    // `{ microphone }` — so the app has one way to ask on both platforms.
+
+    @PluginMethod
+    override fun requestPermissions(call: PluginCall) {
+        if (call.getBoolean("microphone", true) == false ||
+            getPermissionState(MIC_PERMISSION) == PermissionState.GRANTED
+        ) {
+            checkPermissions(call)
+            return
+        }
+        requestPermissionForAlias(MIC_PERMISSION, call, "microphonePermissionResult")
+    }
+
+    @PermissionCallback
+    private fun microphonePermissionResult(call: PluginCall) = checkPermissions(call)
 
     // Registration
 
