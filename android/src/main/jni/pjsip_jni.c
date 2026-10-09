@@ -125,20 +125,35 @@ static void on_incoming_call(pjsua_acc_id acc_id, pjsua_call_id call_id,
     snprintf(remote_info, sizeof(remote_info), "%.*s",
              (int)ci.remote_info.slen, ci.remote_info.ptr);
 
+    /* The PBX's call id, which its push carried too: ties this INVITE to the
+     * call the push already reported. Empty when the header is absent. */
+    static const pj_str_t uuid_hdr_name = { "X-Redyrect-Call-UUID", 20 };
+    char call_uuid[128] = "";
+    if (rdata && rdata->msg_info.msg) {
+        pjsip_generic_string_hdr *h = (pjsip_generic_string_hdr *)
+            pjsip_msg_find_hdr_by_name(rdata->msg_info.msg, &uuid_hdr_name, NULL);
+        if (h) {
+            snprintf(call_uuid, sizeof(call_uuid), "%.*s",
+                     (int)h->hvalue.slen, h->hvalue.ptr);
+        }
+    }
+
     int need_detach;
     JNIEnv *env = get_env(&need_detach);
     if (!env) return;
 
     jstring jremote = (*env)->NewStringUTF(env, remote_info);
+    jstring juuid = (*env)->NewStringUTF(env, call_uuid);
 
     jclass cls = (*env)->GetObjectClass(env, g_callback);
     jmethodID mid = (*env)->GetMethodID(env, cls, "onIncomingCall",
-        "(ILjava/lang/String;)V");
+        "(ILjava/lang/String;Ljava/lang/String;)V");
     if (mid) {
-        (*env)->CallVoidMethod(env, g_callback, mid, (jint)call_id, jremote);
+        (*env)->CallVoidMethod(env, g_callback, mid, (jint)call_id, jremote, juuid);
     }
     (*env)->DeleteLocalRef(env, cls);
     (*env)->DeleteLocalRef(env, jremote);
+    (*env)->DeleteLocalRef(env, juuid);
     release_env(need_detach);
 }
 
@@ -422,6 +437,14 @@ Java_com_redyrect_pjsip_PjsipNative_statusText(JNIEnv *env, jclass cls, jint sta
     char buf[160];
     pj_strerror((pj_status_t)status, buf, sizeof(buf));
     return (*env)->NewStringUTF(env, buf);
+}
+
+/* Send a fresh REGISTER: the transport may have died while the phone slept,
+ * leaving the PBX a contact that no longer reaches us. */
+JNIEXPORT jint JNICALL
+Java_com_redyrect_pjsip_PjsipNative_renewRegistration(JNIEnv *env, jclass cls) {
+    if (g_acc_id == PJSUA_INVALID_ID) return -PJ_EINVALIDOP;
+    return pjsua_acc_set_registration(g_acc_id, PJ_TRUE);
 }
 
 JNIEXPORT jint JNICALL

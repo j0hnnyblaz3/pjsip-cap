@@ -23,6 +23,11 @@ import com.google.firebase.messaging.FirebaseMessaging
             strings = [Manifest.permission.RECORD_AUDIO],
             alias = "microphone",
         ),
+        // Android 13+: without it an incoming call rings in Telecom with nothing on screen.
+        Permission(
+            strings = [Manifest.permission.POST_NOTIFICATIONS],
+            alias = "notifications",
+        ),
     ],
 )
 class PjsipPlugin : Plugin() {

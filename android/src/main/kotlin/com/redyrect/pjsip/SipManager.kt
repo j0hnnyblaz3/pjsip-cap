@@ -33,6 +33,10 @@ data class SipConfig(
 class SipManager(private val context: Context) {
 
     companion object {
+        /** How long a push's call id is expected before its INVITE is presumed lost. */
+        const val EXPECT_INVITE_MS = 30_000L
+        /** How long an answer waits for an INVITE still in flight. */
+        const val ANSWER_WAIT_MS = 10_000L
     }
 
     interface Listener {
@@ -44,6 +48,8 @@ class SipManager(private val context: Context) {
     var listener: Listener? = null
     var registrationState: String = "unregistered"
         private set
+
+    val isRegistered: Boolean get() = registrationState == "registered"
 
     /** The one way registration state changes: stored and reported
      *  together, on the main thread, so `registrationState` can never
@@ -94,6 +100,22 @@ class SipManager(private val context: Context) {
             allocated
         }
 
+    /** Give pjsip call [pjCallId] the id [id] — the PBX call id an INVITE
+     *  carried — replacing one a state event may have allocated first. */
+    @Synchronized
+    private fun bindPluginId(pjCallId: Int, id: String): String {
+        callMap[pjCallId]?.let { old -> if (old != id) reverseCallMap.remove(old) }
+        callMap[pjCallId] = id
+        reverseCallMap[id] = pjCallId
+        return id
+    }
+
+    /** PBX call ids a push announced whose INVITE hasn't arrived. Main thread. */
+    private val expected = mutableSetOf<String>()
+    private class PendingAnswer(val callback: (Exception?) -> Unit, val timeout: Runnable)
+    /** Answers requested before the call's INVITE arrived. Main thread. */
+    private val pendingAnswers = mutableMapOf<String, PendingAnswer>()
+
     private var pjsuaStarted = false
     private val mainHandler = Handler(Looper.getMainLooper())
 
@@ -107,14 +129,21 @@ class SipManager(private val context: Context) {
             setRegistrationState(state, reason)
         }
 
-        override fun onIncomingCall(pjCallId: Int, remoteUri: String) {
-            val pluginCallId = pluginIdFor(pjCallId)
+        override fun onIncomingCall(pjCallId: Int, remoteUri: String, callUuid: String) {
+            val pluginCallId =
+                if (callUuid.isNotBlank()) bindPluginId(pjCallId, callUuid) else pluginIdFor(pjCallId)
 
             val callerName = extractDisplayName(remoteUri)
             activeCalls[pluginCallId] =
                 ActiveCallSnapshot("incoming", remoteUri, callerName)
             mainHandler.post {
+                expected.remove(pluginCallId)
                 listener?.onIncomingCall(pluginCallId, remoteUri, callerName)
+                pendingAnswers.remove(pluginCallId)?.let { pending ->
+                    mainHandler.removeCallbacks(pending.timeout)
+                    pjsipLog("[SipManager] INVITE for $pluginCallId arrived — completing the answer requested before it")
+                    answerCall(pluginCallId, pending.callback)
+                }
             }
         }
 
@@ -252,10 +281,37 @@ class SipManager(private val context: Context) {
             }
         }
 
+    /** A push announced call [callUuid]; its INVITE should follow. Main thread. */
+    fun expectIncomingCall(callUuid: String) {
+        expected.add(callUuid)
+        mainHandler.postDelayed({ expected.remove(callUuid) }, EXPECT_INVITE_MS)
+    }
+
+    /** Re-REGISTER now: after the phone slept the PBX's contact for us may be dead. */
+    fun renewRegistration() {
+        pjHandler.post {
+            val status = PjsipNative.renewRegistration()
+            if (status != 0) pjsipLog("[SipManager] renewRegistration failed: ${PjsipNative.statusText(status)}")
+        }
+    }
+
+    /** Answer [callId]. For a call a push announced whose INVITE is still on
+     *  its way, the answer waits for it, up to [ANSWER_WAIT_MS]. Main thread. */
     fun answerCall(callId: String, callback: (Exception?) -> Unit) {
         val pjCallId = reverseCallMap[callId]
         if (pjCallId == null) {
-            callback(Exception("Call not found"))
+            if (callId !in expected) {
+                callback(Exception("Call not found"))
+                return
+            }
+            pjsipLog("[SipManager] answer $callId: INVITE not here yet — waiting up to ${ANSWER_WAIT_MS / 1000}s")
+            val timeout = Runnable {
+                pendingAnswers.remove(callId)?.callback?.invoke(
+                    Exception("The call did not arrive within ${ANSWER_WAIT_MS / 1000}s of answering"),
+                )
+            }
+            pendingAnswers[callId] = PendingAnswer(callback, timeout)
+            mainHandler.postDelayed(timeout, ANSWER_WAIT_MS)
             return
         }
 
@@ -322,27 +378,6 @@ class SipManager(private val context: Context) {
         }
     }
 
-    /** Push pre-INVITE hint. Called from PushService when an FCM VoIP
-     *  push announces an incoming call is imminent — i.e. a SIP INVITE
-     *  is about to land on the registered transport. PushService also
-     *  reports the call to ConnectionService independently, so the
-     *  system call UI rings without waiting on the SIP layer.
-     *
-     *  Phase 3 work fills this in: re-acquire the network, ensure the
-     *  account is registered, and (optionally) optimistically register
-     *  the inbound call against ConnectionService's existing connection
-     *  so the eventual PJSIP `onIncomingCall` from JNI maps cleanly. For
-     *  the Phase 1 outbound-only smoke test this is never reached at
-     *  runtime; PushService.onMessageReceived only runs when a real
-     *  push arrives, which requires google-services.json + PBX-side
-     *  push delivery to both be live. The stub exists so the plugin
-     *  compiles and the Phase 3 contract is documented in code. */
-    fun handleIncomingCall(remoteUri: String, callerName: String?) {
-        pjsipLog(
-            "handleIncomingCall (push pre-INVITE): $remoteUri ($callerName) — " +
-                "stub; Phase 3 wires this to wake the SIP stack",
-        )
-    }
 
     // Helpers
 

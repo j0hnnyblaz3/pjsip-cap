@@ -48,6 +48,14 @@ class CallConnectionService : ConnectionService() {
 
     /** One SIP call as Telecom sees it; its callbacks go to the controller. */
     class SipConnection(private val callId: String) : Connection() {
+        /** Self-managed calls get no system ringing screen; Telecom asks the app to show one. */
+        override fun onShowIncomingCallUi() =
+            CallController.showIncomingUi(
+                callId,
+                callerDisplayName?.takeIf { it.isNotBlank() }
+                    ?: address?.schemeSpecificPart?.substringBefore('@')
+                    ?: "Incoming call",
+            )
         override fun onAnswer() = CallController.answer(callId) {}
         override fun onReject() = CallController.hangup(callId, DisconnectCause.REJECTED)
         override fun onDisconnect() = CallController.hangup(callId, DisconnectCause.LOCAL)

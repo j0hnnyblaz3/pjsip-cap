@@ -14,7 +14,8 @@ object PjsipNative {
     /** Callback interface invoked from native PJSIP threads */
     interface Callback {
         fun onRegState(state: String, reason: String?)
-        fun onIncomingCall(pjCallId: Int, remoteUri: String)
+        /** [callUuid] is the INVITE's X-Redyrect-Call-UUID, empty when absent. */
+        fun onIncomingCall(pjCallId: Int, remoteUri: String, callUuid: String)
         fun onCallState(pjCallId: Int, state: String, remoteUri: String)
     }
 
@@ -33,6 +34,8 @@ object PjsipNative {
     @JvmStatic external fun makeCall(uri: String): Int
     /** PJSIP's description of a pj_status_t. */
     @JvmStatic external fun statusText(status: Int): String
+    /** Re-REGISTER the account; 0 on success. */
+    @JvmStatic external fun renewRegistration(): Int
     @JvmStatic external fun answerCall(callId: Int, code: Int): Int
     @JvmStatic external fun hangupCall(callId: Int)
     @JvmStatic external fun setHold(callId: Int)

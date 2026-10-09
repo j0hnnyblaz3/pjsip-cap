@@ -4,6 +4,8 @@ import android.content.ComponentName
 import android.content.Context
 import android.net.Uri
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.telecom.Connection
 import android.telecom.DisconnectCause
 import android.telecom.PhoneAccount
@@ -23,7 +25,9 @@ interface CallEventSink {
  *   answer, end and hold through the same functions here, so the Telecom
  *   connection and the SIP call can never disagree.
  * - SIP events are mirrored onto the Telecom connection and emitted to the app.
- * - FCM pushes and incoming INVITEs are reported to Telecom.
+ * - FCM pushes and incoming INVITEs are reported to Telecom, once per call:
+ *   a push and its INVITE share the PBX call id (`X-Redyrect-Call-UUID`).
+ * - A push re-registers SIP from the saved login when the app isn't running.
  *
  * Each collaborator does one thing: `SipManager` SIP, `CallConnectionService`
  * Telecom (it creates connections and hands them here), `PushService` FCM,
@@ -35,9 +39,15 @@ object CallController {
 
     private var appContext: Context? = null
     private var engine: SipManager? = null
+    private var credentials: SipCredentialStore? = null
+    private val main = Handler(Looper.getMainLooper())
 
     /** Telecom connections by plugin callId. */
     private val connections = mutableMapOf<String, CallConnectionService.SipConnection>()
+    /** Calls reported to Telecom, so a push and its INVITE ring once. */
+    private val reported = mutableSetOf<String>()
+    /** Pushed calls whose INVITE hasn't arrived, with the give-up timer. */
+    private val awaitingInvite = mutableMapOf<String, Runnable>()
 
     /** Start the SIP engine once per process. Idempotent: the plugin and the
      *  push service both call it, whichever runs first. */
@@ -45,6 +55,7 @@ object CallController {
         engine?.let { return it }
         val app = context.applicationContext
         appContext = app
+        credentials = SipCredentialStore(app)
         return SipManager(app).also { sip ->
             sip.listener = sipListener
             engine = sip
@@ -58,13 +69,61 @@ object CallController {
 
     val registrationState: String get() = engine?.registrationState ?: "unregistered"
 
+    /** Register, keeping the login so a push can re-register while the app isn't running. */
     fun register(config: SipConfig, completion: (Exception?) -> Unit) =
-        sip().register(config, completion)
+        sip().register(config) { error ->
+            if (error == null) credentials?.save(config)
+            completion(error)
+        }
 
-    fun unregister(completion: (Exception?) -> Unit) = sip().unregister(completion)
+    fun unregister(completion: (Exception?) -> Unit) {
+        credentials?.clear()
+        sip().unregister(completion)
+    }
 
     fun pushTokenUpdated(token: String) {
         events?.emit("pushTokenUpdated", mapOf("token" to token, "platform" to "fcm"))
+    }
+
+    // Pushes
+
+    /** Handle an FCM message if it is a PBX incoming-call push (the
+     *  `domain::reach::IncomingCall` payload). Returns false for anything
+     *  else, so the host can pass it on. Any thread. */
+    fun onPushMessage(context: Context, data: Map<String, String>): Boolean {
+        val callUuid = data["call_uuid"]?.takeIf { it.isNotBlank() } ?: return false
+        val number = data["caller_id_number"].orEmpty()
+        val name = data["caller_id_name"]?.takeIf { it.isNotBlank() }
+        main.post { onIncomingPush(context, callUuid, number, name) }
+        return true
+    }
+
+    /** Telecom rings now; SIP re-registers so the INVITE that follows reaches us. */
+    private fun onIncomingPush(context: Context, callUuid: String, number: String, name: String?) {
+        pjsipLog("[CallController] incoming push $callUuid from ${name ?: number}")
+        val sip = start(context)
+        sip.expectIncomingCall(callUuid)
+        if (sip.isRegistered) {
+            sip.renewRegistration()
+        } else {
+            val login = credentials?.load()
+            if (login == null) {
+                pjsipLog("[CallController] push $callUuid: no saved SIP login — the call cannot reach this phone until the app signs in")
+                return
+            }
+            sip.register(login) { error ->
+                if (error != null) pjsipLog("[CallController] push $callUuid: re-register failed: ${error.message}")
+            }
+        }
+        if (callUuid in reported) return
+        reportIncoming(callUuid, number, name)
+        val giveUp = Runnable {
+            awaitingInvite.remove(callUuid)
+            pjsipLog("[CallController] push $callUuid: no INVITE within ${SipManager.EXPECT_INVITE_MS / 1000}s — ending")
+            closeConnection(callUuid, DisconnectCause.MISSED)
+        }
+        awaitingInvite[callUuid] = giveUp
+        main.postDelayed(giveUp, SipManager.EXPECT_INVITE_MS)
     }
 
     // Calls
@@ -93,6 +152,7 @@ object CallController {
             pjsipLog("[CallController] answer $callId: no Telecom connection — answering the SIP call only")
         }
         pjsipLog("[CallController] answer $callId")
+        appContext?.let { CallNotifications.cancel(it, callId) }
         sip.answerCall(callId) { error ->
             if (error == null) {
                 connection?.setActive()
@@ -132,24 +192,21 @@ object CallController {
         connections[callId]?.setCallerDisplayName(displayName, TelecomManager.PRESENTATION_ALLOWED)
     }
 
-    // Incoming pushes
-
-    /** An FCM incoming-call push: Telecom rings now, the SIP engine wakes for
-     *  the INVITE that follows. No JS event — the INVITE brings the call to
-     *  the app with its SIP callId, as on iOS. */
-    fun onIncomingPush(context: Context, callId: String, remoteUri: String, callerName: String?) {
-        pjsipLog("[CallController] incoming push $callId from $remoteUri")
-        start(context).handleIncomingCall(remoteUri, callerName)
-        reportIncoming(callId, remoteUri, callerName)
-    }
-
     // Telecom connections (CallConnectionService hands them here)
 
     fun attach(callId: String, connection: CallConnectionService.SipConnection) {
         connections[callId] = connection
     }
 
+    /** Telecom wants the incoming-call screen shown for [callId]. */
+    fun showIncomingUi(callId: String, callerName: String) {
+        appContext?.let { CallNotifications.showIncoming(it, callId, callerName) }
+    }
+
     private fun closeConnection(callId: String, cause: Int) {
+        reported.remove(callId)
+        awaitingInvite.remove(callId)?.let { main.removeCallbacks(it) }
+        appContext?.let { CallNotifications.cancel(it, callId) }
         connections.remove(callId)?.let { connection ->
             connection.setDisconnected(DisconnectCause(cause))
             connection.destroy()
@@ -178,12 +235,18 @@ object CallController {
         }
 
         override fun onIncomingCall(callId: String, remoteUri: String, callerName: String?) {
-            reportIncoming(callId, remoteUri, callerName)
+            awaitingInvite.remove(callId)?.let { main.removeCallbacks(it) }
+            if (callId in reported) {
+                callerName?.let { connections[callId]?.setCallerDisplayName(it, TelecomManager.PRESENTATION_ALLOWED) }
+            } else {
+                reportIncoming(callId, remoteUri, callerName)
+            }
             events?.emit("incomingCall", mapOf("callId" to callId, "remoteUri" to remoteUri, "callerName" to callerName))
         }
     }
 
     private fun reportIncoming(callId: String, remoteUri: String, callerName: String?) {
+        reported.add(callId)
         reportToTelecom(callId) { telecom, handle ->
             telecom.addNewIncomingCall(handle, Bundle().apply {
                 putString("callId", callId)
