@@ -48,6 +48,13 @@ class CallConnectionService : ConnectionService() {
 
     /** One SIP call as Telecom sees it; its callbacks go to the controller. */
     class SipConnection(private val callId: String) : Connection() {
+        init {
+            // Without it Telecom treats the call as a cellular one and sets
+            // MODE_IN_CALL, which routes audio to the modem: the app's
+            // microphone and speaker streams carry nothing.
+            audioModeIsVoip = true
+        }
+
         /** Self-managed calls get no system ringing screen; Telecom asks the app to show one. */
         override fun onShowIncomingCallUi() =
             CallController.showIncomingUi(
