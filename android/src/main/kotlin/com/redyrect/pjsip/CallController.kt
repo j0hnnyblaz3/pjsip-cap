@@ -145,6 +145,7 @@ object CallController {
         onMain {
             ledger.open(callId, incoming = false, state = "calling", remoteUri = uri, callerName = displayName)
         }
+        appContext?.let { CallService.start(it, callId, displayName ?: uri) }
         reportToTelecom(callId) { telecom, handle ->
             telecom.placeCall(telecomAddress(uri), Bundle().apply {
                 putString("callId", callId)
@@ -166,12 +167,19 @@ object CallController {
             pjsipLog("[CallController] answer $callId: no Telecom connection — answering the SIP call only")
         }
         pjsipLog("[CallController] answer $callId")
-        appContext?.let { CallNotifications.cancel(it, callId) }
+        appContext?.let {
+            CallNotifications.cancel(it, callId)
+            // Now, while whoever asked to answer is on screen: Android lets a
+            // call service start only then, and the call needs it for the
+            // microphone once the app is off screen.
+            CallService.start(it, callId, ledger.callerName(callId) ?: pushedNames[callId])
+        }
         sip.answerCall(callId) { error ->
             if (error == null) {
                 connection?.setActive()
             } else {
                 pjsipLog("[CallController] answer $callId failed: ${error.message}")
+                stopServiceIfIdle()
             }
             completion(error)
         }
@@ -230,6 +238,11 @@ object CallController {
         CallNotifications.showIncoming(context, callId, callerName)
     }
 
+    /** The call service runs while any call is up. */
+    private fun stopServiceIfIdle() {
+        if (connections.isEmpty() && ledger.active().isEmpty()) appContext?.let { CallService.stop(it) }
+    }
+
     private fun closeConnection(callId: String, cause: Int) {
         reported.remove(callId)
         pushedNames.remove(callId)
@@ -239,6 +252,7 @@ object CallController {
             connection.setDisconnected(DisconnectCause(cause))
             connection.destroy()
         }
+        stopServiceIfIdle()
     }
 
     // SIP engine events
@@ -260,6 +274,7 @@ object CallController {
                 "disconnected" -> {
                     ledger.finish(callId, sipStatus, sipReason)
                     closeConnection(callId, DisconnectCause.REMOTE)
+                    stopServiceIfIdle()
                     return
                 }
                 "confirmed" -> connections[callId]?.setActive()

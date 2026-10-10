@@ -1,6 +1,7 @@
 package com.redyrect.pjsip
 
 import android.app.Activity
+import android.app.KeyguardManager
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
@@ -16,23 +17,24 @@ import androidx.core.app.NotificationManagerCompat
 import androidx.core.app.Person
 
 /**
- * The incoming-call screen. A self-managed Telecom call gets no system UI,
- * so when Telecom asks (`onShowIncomingCallUi`) the app posts a call-style
- * notification whose full-screen intent opens the app over the lock screen.
- * Answer and Decline go to [CallController] like every other answer/end.
+ * The call's notifications. A self-managed Telecom call gets no system UI,
+ * so the plugin draws it: a ringing call-style notification (Answer /
+ * Decline, both usable on the lock screen), then, from [CallService], the
+ * ongoing call (Hang up; tapping it opens the app, which needs an unlocked
+ * phone — the app holds patient data). Every button goes to
+ * [CallController] like every other answer and end.
  */
 internal object CallNotifications {
     private const val CHANNEL_ID = "pjsip_incoming_calls"
+    private const val ONGOING_CHANNEL_ID = "pjsip_ongoing_calls"
     const val EXTRA_CALL_ID = "com.redyrect.pjsip.CALL_ID"
+    const val EXTRA_CAUSE = "com.redyrect.pjsip.CAUSE"
+    /** The ongoing call's notification, owned by [CallService]. */
+    const val ONGOING_ID = 0x5C411
 
     fun showIncoming(context: Context, callId: String, callerName: String) {
         ensureChannel(context)
-        val decline = PendingIntent.getBroadcast(
-            context,
-            requestCode(callId, 1),
-            Intent(context, CallDeclineReceiver::class.java).putExtra(EXTRA_CALL_ID, callId),
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
-        )
+        val decline = endIntent(context, callId, android.telecom.DisconnectCause.REJECTED, 1)
         val answer = PendingIntent.getActivity(
             context,
             requestCode(callId, 2),
@@ -69,6 +71,38 @@ internal object CallNotifications {
         }
     }
 
+    /** The ongoing call, for [CallService] to run under. */
+    fun ongoing(context: Context, callId: String, callerName: String): android.app.Notification {
+        ensureOngoingChannel(context)
+        val hangUp = endIntent(context, callId, android.telecom.DisconnectCause.LOCAL, 4)
+        val openApp = PendingIntent.getActivity(
+            context,
+            requestCode(callId, 5),
+            launchIntent(context),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
+        val caller = Person.Builder().setName(callerName).setImportant(true).build()
+        return NotificationCompat.Builder(context, ONGOING_CHANNEL_ID)
+            .setSmallIcon(context.applicationInfo.icon)
+            .setContentTitle(callerName)
+            .setCategory(NotificationCompat.CATEGORY_CALL)
+            .setOngoing(true)
+            .setUsesChronometer(true)
+            .setContentIntent(openApp)
+            .setStyle(NotificationCompat.CallStyle.forOngoingCall(caller, hangUp))
+            .build()
+    }
+
+    private fun endIntent(context: Context, callId: String, cause: Int, action: Int): PendingIntent =
+        PendingIntent.getBroadcast(
+            context,
+            requestCode(callId, action),
+            Intent(context, CallEndReceiver::class.java)
+                .putExtra(EXTRA_CALL_ID, callId)
+                .putExtra(EXTRA_CAUSE, cause),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
+
     fun cancel(context: Context, callId: String) {
         NotificationManagerCompat.from(context).cancel(notificationId(callId))
     }
@@ -96,20 +130,37 @@ internal object CallNotifications {
         )
     }
 
+    private fun ensureOngoingChannel(context: Context) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+        val manager = context.getSystemService(NotificationManager::class.java)
+        if (manager.getNotificationChannel(ONGOING_CHANNEL_ID) != null) return
+        manager.createNotificationChannel(
+            NotificationChannel(ONGOING_CHANNEL_ID, "Ongoing calls", NotificationManager.IMPORTANCE_LOW).apply {
+                setSound(null, null)
+                lockscreenVisibility = android.app.Notification.VISIBILITY_PUBLIC
+            },
+        )
+    }
+
     private fun notificationId(callId: String) = callId.hashCode()
     private fun requestCode(callId: String, action: Int) = callId.hashCode() * 31 + action
 }
 
-/** Decline from the notification: ends the call without opening the app. */
-class CallDeclineReceiver : BroadcastReceiver() {
+/** Decline or Hang up from a notification: ends the call without opening
+ *  the app, so it works on the lock screen. */
+class CallEndReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         val callId = intent.getStringExtra(CallNotifications.EXTRA_CALL_ID) ?: return
-        CallController.hangup(callId, android.telecom.DisconnectCause.REJECTED)
+        val cause = intent.getIntExtra(CallNotifications.EXTRA_CAUSE, android.telecom.DisconnectCause.LOCAL)
+        CallController.hangup(callId, cause)
     }
 }
 
-/** Answer from the notification: answers, then opens the app on the call. An
- *  activity because Android 12+ won't let a notification's broadcast start one. */
+/** Answer from the notification. It shows over the lock screen, so answering
+ *  needs no unlock; the app opens only on an unlocked phone — on a locked one
+ *  the call carries on under [CallService]'s notification, as a CallKit call
+ *  does on iOS. An activity, not a broadcast, because [CallService] can only
+ *  start while something of the app is on screen. */
 class CallAnswerActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -118,7 +169,8 @@ class CallAnswerActivity : Activity() {
                 if (error != null) pjsipLog("[CallAnswerActivity] answer $callId failed: ${error.message}")
             }
         }
-        startActivity(CallNotifications.launchIntent(this))
+        val locked = getSystemService(KeyguardManager::class.java)?.isKeyguardLocked == true
+        if (!locked) startActivity(CallNotifications.launchIntent(this))
         finish()
     }
 }

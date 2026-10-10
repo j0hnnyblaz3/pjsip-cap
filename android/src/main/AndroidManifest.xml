@@ -8,6 +8,7 @@
     <uses-permission android:name="android.permission.MANAGE_OWN_CALLS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_PHONE_CALL" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
 
@@ -21,10 +22,17 @@
             </intent-filter>
         </service>
 
+        <!-- The call while it is up: keeps the microphone when the app is off
+             screen, and is the ongoing-call notification. -->
+        <service
+            android:name=".CallService"
+            android:exported="false"
+            android:foregroundServiceType="phoneCall|microphone" />
+
         <!-- No FCM service here: the host app owns the one Android delivers to
              and routes call pushes to CallController.onPushMessage. -->
         <receiver
-            android:name=".CallDeclineReceiver"
+            android:name=".CallEndReceiver"
             android:exported="false" />
 
         <activity
