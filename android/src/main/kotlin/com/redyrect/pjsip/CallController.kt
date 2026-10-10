@@ -52,7 +52,30 @@ object CallController {
     private val pushedNames = mutableMapOf<String, String>()
 
     /** Every call event the app gets — see `CallLedger`. Main thread. */
-    private val ledger = CallLedger { snapshot -> events?.emit("callUpdated", snapshot) }
+    private val ledger = CallLedger { snapshot ->
+        events?.emit("callUpdated", snapshot)
+        val callId = snapshot["callId"] as? String
+        observers.filter { it.first == callId }.forEach { it.second(snapshot) }
+    }
+    /** The native call screen's subscriptions, by call id. Main thread. */
+    private val observers = mutableListOf<Pair<String, (Map<String, Any?>) -> Unit>>()
+
+    /** Follow [callId]'s snapshots (the same ones the app gets). Returns the
+     *  unsubscribe. Main thread. */
+    fun observe(callId: String, observer: (Map<String, Any?>) -> Unit): () -> Unit {
+        val entry = callId to observer
+        observers.add(entry)
+        return { observers.remove(entry) }
+    }
+
+    /** The call as it stands, or null when it is not (or no longer) up. */
+    fun snapshot(callId: String): Map<String, Any?>? = ledger.active().find { it["callId"] == callId }
+
+    /** Who a pushed call is from, before its INVITE has named it. */
+    fun pushedName(callId: String): String? = pushedNames[callId]
+
+    /** Whether [callId] is still up, ringing for its INVITE included. */
+    fun isLive(callId: String): Boolean = ledger.has(callId) || callId in reported
 
     private fun onMain(block: () -> Unit) {
         if (Looper.myLooper() == Looper.getMainLooper()) block() else main.post(block)
