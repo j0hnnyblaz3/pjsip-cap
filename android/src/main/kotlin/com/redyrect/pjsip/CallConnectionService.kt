@@ -28,6 +28,9 @@ class CallConnectionService : ConnectionService() {
             setRinging()
             connectionCapabilities = CallController.connectionCapabilities
             CallController.attach(callId, this)
+            // Show the ringing screen now rather than only from
+            // onShowIncomingCallUi: Samsung's Telecom never calls it.
+            showIncomingUi()
         }
     }
 
@@ -55,8 +58,12 @@ class CallConnectionService : ConnectionService() {
             audioModeIsVoip = true
         }
 
-        /** Self-managed calls get no system ringing screen; Telecom asks the app to show one. */
-        override fun onShowIncomingCallUi() =
+        /** Self-managed calls get no system ringing screen; Telecom asks the
+         *  app to show one. Also called when the connection is created, since
+         *  not every Telecom asks; both post the same notification. */
+        override fun onShowIncomingCallUi() = showIncomingUi()
+
+        fun showIncomingUi() =
             CallController.showIncomingUi(
                 callId,
                 callerDisplayName?.takeIf { it.isNotBlank() }

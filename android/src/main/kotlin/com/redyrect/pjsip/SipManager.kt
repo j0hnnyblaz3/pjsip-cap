@@ -158,6 +158,12 @@ class SipManager(private val context: Context) {
             // give a single call TWO identities — the phantom that arrived
             // first and the real one moments later — and consumers latched
             // onto the phantom, which has no ConnectionService behind it.
+            // A call that already ended has no id to report against; giving it
+            // a new one made the app show a call that "failed".
+            if (state == "disconnected" && !callMap.containsKey(pjCallId)) {
+                pjsipLog("[SipManager] DISCONNECTED for pjsip call $pjCallId, which is no longer tracked — ignored")
+                return
+            }
             val pluginCallId = pluginIdFor(pjCallId)
 
             if (state == "disconnected") {
@@ -329,16 +335,16 @@ class SipManager(private val context: Context) {
         }
     }
 
+    /** End [callId]. The call stays mapped until PJSIP reports DISCONNECTED,
+     *  which clears it and reports it once — as on iOS. Clearing it here and
+     *  reporting "disconnected" early left PJSIP's own DISCONNECTED with no
+     *  call to find, and it invented a second id the app showed as failed. */
     fun hangupCall(callId: String) {
         val pjCallId = reverseCallMap[callId] ?: run {
             pjsipLog("[SipManager] hangup $callId: no SIP call by that id — nothing was ended")
             return
         }
         pjHandler.post { PjsipNative.hangupCall(pjCallId) }
-        callMap.remove(pjCallId)
-        reverseCallMap.remove(callId)
-        activeCalls.remove(callId)
-        listener?.onCallStateChanged(callId, "disconnected", null)
     }
 
     // In-call controls

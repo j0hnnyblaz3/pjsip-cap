@@ -62,6 +62,7 @@ internal object CallNotifications {
             .build()
         try {
             NotificationManagerCompat.from(context).notify(notificationId(callId), notification)
+            pjsipLog("[CallNotifications] incoming call $callId shown")
         } catch (e: SecurityException) {
             // POST_NOTIFICATIONS not granted: the call still rings in Telecom but nothing is visible.
             pjsipLog("[CallNotifications] cannot show incoming call $callId: notifications not permitted")

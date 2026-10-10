@@ -200,7 +200,11 @@ object CallController {
 
     /** Telecom wants the incoming-call screen shown for [callId]. */
     fun showIncomingUi(callId: String, callerName: String) {
-        appContext?.let { CallNotifications.showIncoming(it, callId, callerName) }
+        val context = appContext ?: run {
+            pjsipLog("[CallController] incoming call $callId: not started — no ringing screen")
+            return
+        }
+        CallNotifications.showIncoming(context, callId, callerName)
     }
 
     private fun closeConnection(callId: String, cause: Int) {
