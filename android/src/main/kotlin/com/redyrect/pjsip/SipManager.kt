@@ -41,8 +41,10 @@ class SipManager(private val context: Context) {
 
     interface Listener {
         fun onRegistrationStateChanged(state: String, reason: String?)
-        fun onCallStateChanged(callId: String, state: String, remoteUri: String?)
-        fun onIncomingCall(callId: String, remoteUri: String, callerName: String?)
+        /** PJSIP's report of a call: its state, which side placed it and the
+         *  last SIP status it reached. Repeats are normal; the ledger drops them. */
+        fun onCallStateChanged(callId: String, state: String, remoteUri: String?, incoming: Boolean, sipStatus: Int, sipReason: String?)
+        fun onIncomingCall(callId: String, remoteUri: String, callerName: String?, callUuid: String?)
     }
 
     var listener: Listener? = null
@@ -71,17 +73,6 @@ class SipManager(private val context: Context) {
     private val reverseCallMap = mutableMapOf<String, Int>()
     private var callIdCounter = 0
 
-    /** Last-known snapshot per live plugin callId, for client-side call
-     *  recovery after a webview reload. The native bridge pushes state
-     *  rather than exposing a call-info getter, so we maintain this
-     *  alongside the same funnels that already drive state callbacks. */
-    private data class ActiveCallSnapshot(
-        val state: String,
-        val remoteUri: String?,
-        val callerName: String?,
-    )
-    private val activeCalls = mutableMapOf<String, ActiveCallSnapshot>()
-
     /**
      * The one place a pjsip call id becomes a plugin-facing call id.
      *
@@ -106,8 +97,8 @@ class SipManager(private val context: Context) {
     private fun bindPluginId(pjCallId: Int, id: String): String {
         callMap[pjCallId]?.let { old ->
             if (old != id) {
+                pjsipLog("[SipManager] pjsip call $pjCallId renamed $old → $id")
                 reverseCallMap.remove(old)
-                activeCalls.remove(old)?.let { activeCalls[id] = it }
             }
         }
         callMap[pjCallId] = id
@@ -139,11 +130,9 @@ class SipManager(private val context: Context) {
                 if (callUuid.isNotBlank()) bindPluginId(pjCallId, callUuid) else pluginIdFor(pjCallId)
 
             val callerName = extractDisplayName(remoteUri)
-            activeCalls[pluginCallId] =
-                ActiveCallSnapshot("incoming", remoteUri, callerName)
             mainHandler.post {
                 expected.remove(pluginCallId)
-                listener?.onIncomingCall(pluginCallId, remoteUri, callerName)
+                listener?.onIncomingCall(pluginCallId, remoteUri, callerName, callUuid.ifBlank { null })
                 pendingAnswers.remove(pluginCallId)?.let { pending ->
                     mainHandler.removeCallbacks(pending.timeout)
                     pjsipLog("[SipManager] INVITE for $pluginCallId arrived — completing the answer requested before it")
@@ -152,12 +141,11 @@ class SipManager(private val context: Context) {
             }
         }
 
-        override fun onCallState(pjCallId: Int, state: String, remoteUri: String) {
-            // Reuse the call's existing identity, allocating one if this event
-            // beat onIncomingCall. Fabricating "unknown-$pjCallId" here used to
-            // give a single call TWO identities — the phantom that arrived
-            // first and the real one moments later — and consumers latched
-            // onto the phantom, which has no ConnectionService behind it.
+        override fun onCallState(
+            pjCallId: Int, state: String, remoteUri: String,
+            incoming: Boolean, sipStatus: Int, sipReason: String,
+        ) {
+            if (state == "null") return
             // A call that already ended has no id to report against; giving it
             // a new one made the app show a call that "failed".
             if (state == "disconnected" && !callMap.containsKey(pjCallId)) {
@@ -165,21 +153,15 @@ class SipManager(private val context: Context) {
                 return
             }
             val pluginCallId = pluginIdFor(pjCallId)
-
             if (state == "disconnected") {
                 callMap.remove(pjCallId)
                 reverseCallMap.remove(pluginCallId)
-                activeCalls.remove(pluginCallId)
-            } else {
-                activeCalls[pluginCallId] = ActiveCallSnapshot(
-                    state,
-                    remoteUri.ifEmpty { activeCalls[pluginCallId]?.remoteUri },
-                    activeCalls[pluginCallId]?.callerName,
-                )
             }
-
             mainHandler.post {
-                listener?.onCallStateChanged(pluginCallId, state, remoteUri)
+                listener?.onCallStateChanged(
+                    pluginCallId, state, remoteUri.ifEmpty { null },
+                    incoming, sipStatus, sipReason.ifEmpty { null },
+                )
             }
         }
     }
@@ -242,7 +224,6 @@ class SipManager(private val context: Context) {
             mainHandler.post {
                 callMap.clear()
                 reverseCallMap.clear()
-                activeCalls.clear()
                 setRegistrationState("unregistered")
                 callback(null)
             }
@@ -273,24 +254,9 @@ class SipManager(private val context: Context) {
 
         latch.await()
 
-        val callId = resultCallId
+        return resultCallId
             ?: throw IllegalStateException("Cannot call $uri: ${PjsipNative.statusText(-result)}")
-        activeCalls[callId] = ActiveCallSnapshot("calling", uri, null)
-        listener?.onCallStateChanged(callId, "calling", uri)
-        return callId
     }
-
-    /** Snapshot every call still being tracked, for client-side
-     *  recovery after a webview reload. */
-    fun getActiveCalls(): List<Map<String, Any?>> =
-        activeCalls.map { (callId, c) ->
-            buildMap<String, Any?> {
-                put("callId", callId)
-                put("state", c.state)
-                c.remoteUri?.let { put("remoteUri", it) }
-                c.callerName?.let { put("callerName", it) }
-            }
-        }
 
     /** A push announced call [callUuid]; its INVITE should follow. Main thread. */
     fun expectIncomingCall(callUuid: String) {

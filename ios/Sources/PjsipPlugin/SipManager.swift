@@ -40,7 +40,11 @@ struct SipConfig {
 
 protocol SipManagerDelegate: AnyObject {
     func onRegistrationStateChanged(state: String, reason: String?)
-    func onCallStateChanged(callId: String, state: String, remoteUri: String?)
+    /// PJSIP's report of a call: its state, which side placed it (`incoming`)
+    /// and the last SIP status it reached (0 / nil before any). Repeats are
+    /// normal; the controller's ledger drops them.
+    func onCallStateChanged(callId: String, state: String, remoteUri: String?,
+                            incoming: Bool, sipStatus: Int, sipReason: String?)
     /// Fires for inbound calls. `callUuid` is the value of the INVITE's
     /// `X-Redyrect-Call-UUID` header when present — this is the
     /// PBX-side identifier (FreeSWITCH channel UUID) the same as the
@@ -888,7 +892,6 @@ class SipManager: NSObject {
             throw NSError(domain: "PjsipPlugin", code: -1,
                           userInfo: [NSLocalizedDescriptionKey: "Cannot call \(uri): PJSIP returned no call"])
         }
-        delegate?.onCallStateChanged(callId: callId, state: "calling", remoteUri: uri)
         return callId
     }
 
@@ -982,7 +985,9 @@ class SipManager: NSObject {
                     self.callMap.removeValue(forKey: pjCallId)
                     self.reverseCallMap.removeValue(forKey: callId)
                     DispatchQueue.main.async {
-                        self.delegate?.onCallStateChanged(callId: callId, state: "disconnected", remoteUri: nil)
+                        self.delegate?.onCallStateChanged(callId: callId, state: "disconnected", remoteUri: nil,
+                                                          incoming: false, sipStatus: 0,
+                                                          sipReason: "BYE could not be sent (status \(status))")
                     }
                 }
                 return
@@ -996,7 +1001,8 @@ class SipManager: NSObject {
                 self.removePendingCallUuid(callId)
                 self.failPendingAnswer(callUuid: callId, reason: "call ended before INVITE")
                 DispatchQueue.main.async {
-                    self.delegate?.onCallStateChanged(callId: callId, state: "disconnected", remoteUri: nil)
+                    self.delegate?.onCallStateChanged(callId: callId, state: "disconnected", remoteUri: nil,
+                                                      incoming: true, sipStatus: 0, sipReason: nil)
                 }
             }
         }
@@ -1232,7 +1238,6 @@ class SipManager: NSObject {
     }
 
     func handleCallStateChange(pjCallId: pjsua_call_id) {
-        let pluginCallId = pluginId(for: pjCallId)
 
         // pjsua invalidates the call before/while delivering the terminal
         // DISCONNECTED transition, so pjsua_call_get_info() routinely fails
@@ -1245,18 +1250,33 @@ class SipManager: NSObject {
         // every consumer treats a missing terminal state as "still up".
         let info = getCallInfo(pjCallId)
         let state = info.map { effectiveCallState(info: $0) } ?? "disconnected"
-        let remoteUri = info.map { $0.remoteUri }
         if info == nil {
             pjsipLog("[Pjsip] call \(pjCallId): get_info failed — reporting disconnected")
         }
-
+        if state == "null" { return }
+        // A call that already ended has no id to report against; allocating
+        // one gave the app a second, made-up call.
+        if state == "disconnected" && callMap[pjCallId] == nil {
+            pjsipLog("[Pjsip] DISCONNECTED for pjsip call \(pjCallId), which is no longer tracked — ignored")
+            return
+        }
+        let pluginCallId = pluginId(for: pjCallId)
         if state == "disconnected" {
             callMap.removeValue(forKey: pjCallId)
             reverseCallMap.removeValue(forKey: pluginCallId)
         }
+        report(pluginCallId, state: state, info: info)
+    }
 
+    /// Hand one call report to the delegate, on the main thread.
+    private func report(_ pluginCallId: String, state: String, info: CallInfo?) {
+        let remoteUri = info.map { $0.remoteUri }
+        let incoming = info.map { $0.role == PJSIP_ROLE_UAS } ?? false
+        let sipStatus = info?.lastStatus ?? 0
+        let sipReason = info?.lastStatusText
         DispatchQueue.main.async { [weak self] in
-            self?.delegate?.onCallStateChanged(callId: pluginCallId, state: state, remoteUri: remoteUri)
+            self?.delegate?.onCallStateChanged(callId: pluginCallId, state: state, remoteUri: remoteUri,
+                                               incoming: incoming, sipStatus: sipStatus, sipReason: sipReason)
         }
     }
 
@@ -1320,51 +1340,8 @@ class SipManager: NSObject {
         // here whenever media transitions so React state stays in
         // sync. effectiveCallState() picks "held" when media is in
         // LOCAL_HOLD/REMOTE_HOLD on an otherwise confirmed call.
-        let pluginCallId = pluginId(for: pjCallId)
-        let state = effectiveCallState(info: info)
-        let remoteUri = info.remoteUri
-        DispatchQueue.main.async { [weak self] in
-            self?.delegate?.onCallStateChanged(
-                callId: pluginCallId,
-                state: state,
-                remoteUri: remoteUri
-            )
-        }
-    }
-
-    /// Snapshot every call PJSIP is still tracking, for client-side
-    /// recovery after a webview reload. Authoritative: state/remote come
-    /// straight from `pjsua_call_get_info`, not cached bookkeeping.
-    ///
-    /// Must run on `pjThread` — `pjsua_call_get_info` calls `pj_thread_this`
-    /// internally, which asserts when invoked from a thread pjlib didn't
-    /// register. The Capacitor bridge calls this on its own queue, so
-    /// without performSync the assertion crashes the app on resume /
-    /// during reconcile polls.
-    func getActiveCalls() -> [[String: Any]] {
-        var calls: [[String: Any]] = []
-        pjThread.performSync { [weak self] in
-            guard let self = self else { return }
-            for (pluginCallId, pjCallId) in self.reverseCallMap {
-                guard let info = self.getCallInfo(pjCallId) else { continue }
-                if info.state == PJSIP_INV_STATE_DISCONNECTED
-                    || info.state == PJSIP_INV_STATE_NULL { continue }
-                let remoteUri = info.remoteUri
-                var entry: [String: Any] = [
-                    "callId": pluginCallId,
-                    // effectiveCallState picks "held" when media is in
-                    // LOCAL_HOLD/REMOTE_HOLD — so recovery polls after
-                    // app resume show the correct hold state.
-                    "state": self.effectiveCallState(info: info),
-                ]
-                if !remoteUri.isEmpty { entry["remoteUri"] = remoteUri }
-                if let name = extractDisplayName(from: remoteUri) {
-                    entry["callerName"] = name
-                }
-                calls.append(entry)
-            }
-        }
-        return calls
+        guard let pluginCallId = callMap[pjCallId] else { return }
+        report(pluginCallId, state: effectiveCallState(info: info), info: info)
     }
 
     // MARK: - Helpers
@@ -1383,7 +1360,9 @@ class SipManager: NSObject {
             role: raw.pointee.role,
             mediaStatus: raw.pointee.media_status,
             confSlot: raw.pointee.conf_slot,
-            remoteUri: pjStringToSwift(raw.pointee.remote_info)
+            remoteUri: pjStringToSwift(raw.pointee.remote_info),
+            lastStatus: Int(raw.pointee.last_status.rawValue),
+            lastStatusText: pjStringToSwift(raw.pointee.last_status_text)
         )
     }
 
@@ -1439,6 +1418,9 @@ struct CallInfo {
     let mediaStatus: pjsua_call_media_status
     let confSlot: pjsua_conf_port_id
     let remoteUri: String
+    /// The last SIP status the call reached (486, 603, 200 …), 0 before any.
+    let lastStatus: Int
+    let lastStatusText: String
 }
 
 // MARK: - pj_str helpers

@@ -43,9 +43,8 @@ npx cap sync
 * [`requestPermissions(...)`](#requestpermissions)
 * [`registerPush()`](#registerpush)
 * [`unregisterPush()`](#unregisterpush)
-* [`addListener('callStateChanged', ...)`](#addlistenercallstatechanged-)
+* [`addListener('callUpdated', ...)`](#addlistenercallupdated-)
 * [`addListener('registrationStateChanged', ...)`](#addlistenerregistrationstatechanged-)
-* [`addListener('incomingCall', ...)`](#addlistenerincomingcall-)
 * [`addListener('pushTokenUpdated', ...)`](#addlistenerpushtokenupdated-)
 * [Interfaces](#interfaces)
 * [Type Aliases](#type-aliases)
@@ -140,14 +139,14 @@ hangupCall(options: { callId: string; }) => Promise<void>
 ### getActiveCalls()
 
 ```typescript
-getActiveCalls() => Promise<{ calls: ActiveCall[]; }>
+getActiveCalls() => Promise<{ calls: CallSnapshot[]; }>
 ```
 
 Enumerate calls the engine is currently tracking. Used for call
 recovery: a freshly-(re)loaded client queries this on init and
 re-adopts any in-flight call so it stays controllable.
 
-**Returns:** <code>Promise&lt;{ calls: ActiveCall[]; }&gt;</code>
+**Returns:** <code>Promise&lt;{ calls: CallSnapshot[]; }&gt;</code>
 
 --------------------
 
@@ -282,16 +281,18 @@ unregisterPush() => Promise<void>
 --------------------
 
 
-### addListener('callStateChanged', ...)
+### addListener('callUpdated', ...)
 
 ```typescript
-addListener(event: 'callStateChanged', listener: (data: CallStateEvent) => void) => Promise<PluginListenerHandle>
+addListener(event: 'callUpdated', listener: (data: CallSnapshot) => void) => Promise<PluginListenerHandle>
 ```
 
-| Param          | Type                                                                         |
-| -------------- | ---------------------------------------------------------------------------- |
-| **`event`**    | <code>'callStateChanged'</code>                                              |
-| **`listener`** | <code>(data: <a href="#callstateevent">CallStateEvent</a>) =&gt; void</code> |
+Every change to every call, as a whole <a href="#callsnapshot">`CallSnapshot`</a>.
+
+| Param          | Type                                                                     |
+| -------------- | ------------------------------------------------------------------------ |
+| **`event`**    | <code>'callUpdated'</code>                                               |
+| **`listener`** | <code>(data: <a href="#callsnapshot">CallSnapshot</a>) =&gt; void</code> |
 
 **Returns:** <code>Promise&lt;<a href="#pluginlistenerhandle">PluginListenerHandle</a>&gt;</code>
 
@@ -308,22 +309,6 @@ addListener(event: 'registrationStateChanged', listener: (data: RegistrationStat
 | -------------- | -------------------------------------------------------------------------------------------- |
 | **`event`**    | <code>'registrationStateChanged'</code>                                                      |
 | **`listener`** | <code>(data: <a href="#registrationstateevent">RegistrationStateEvent</a>) =&gt; void</code> |
-
-**Returns:** <code>Promise&lt;<a href="#pluginlistenerhandle">PluginListenerHandle</a>&gt;</code>
-
---------------------
-
-
-### addListener('incomingCall', ...)
-
-```typescript
-addListener(event: 'incomingCall', listener: (data: IncomingCallEvent) => void) => Promise<PluginListenerHandle>
-```
-
-| Param          | Type                                                                               |
-| -------------- | ---------------------------------------------------------------------------------- |
-| **`event`**    | <code>'incomingCall'</code>                                                        |
-| **`listener`** | <code>(data: <a href="#incomingcallevent">IncomingCallEvent</a>) =&gt; void</code> |
 
 **Returns:** <code>Promise&lt;<a href="#pluginlistenerhandle">PluginListenerHandle</a>&gt;</code>
 
@@ -364,19 +349,41 @@ addListener(event: 'pushTokenUpdated', listener: (data: PushTokenEvent) => void)
 | **`srtpPolicy`** | <code><a href="#srtppolicy">SrtpPolicy</a></code>     | Media encryption policy. Omit to leave the decision to the server. 'mandatory' fails the call rather than falling back to plain RTP.                                                                                                                                                                                                               |
 
 
-#### ActiveCall
+#### CallSnapshot
 
-A call the engine currently knows about. Returned by `getActiveCalls`
-so a client that lost its in-memory state (web hot-reload, native
-background→resume after the OS reclaimed the webview) can re-adopt
-in-flight calls instead of orphaning them.
+A call, whole. The one event every platform sends (`callUpdated`), every
+time anything about the call changes, and what `getActiveCalls` returns.
 
-| Prop             | Type                                            |
-| ---------------- | ----------------------------------------------- |
-| **`callId`**     | <code>string</code>                             |
-| **`state`**      | <code><a href="#callstate">CallState</a></code> |
-| **`remoteUri`**  | <code>string</code>                             |
-| **`callerName`** | <code>string</code>                             |
+Every platform keeps these rules, so a consumer never has to repair them:
+  • One `callId` for the call's whole life — the PBX call id
+    (`X-Redyrect-Call-UUID`) when the INVITE carries one.
+  • Fields are only ever added: a later snapshot never drops the caller
+    name or URI an earlier one carried.
+  • `disconnected` is sent exactly once, with `end`, and nothing is sent
+    for that call afterwards.
+
+| Prop             | Type                                                    | Description                                                                                                                                                                                              |
+| ---------------- | ------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **`callId`**     | <code>string</code>                                     |                                                                                                                                                                                                          |
+| **`direction`**  | <code><a href="#calldirection">CallDirection</a></code> |                                                                                                                                                                                                          |
+| **`state`**      | <code><a href="#callstate">CallState</a></code>         |                                                                                                                                                                                                          |
+| **`remoteUri`**  | <code>string</code>                                     | The other party as SIP gave it, display name included when present (`"Ann Lee" &lt;sip:uid@host&gt;`). Empty only for a pushed call whose INVITE hasn't arrived and whose push had no number.            |
+| **`callerName`** | <code>string</code>                                     | The other party's name as SIP gave it: the INVITE's From display name for incoming, the dialer's `displayName` for outgoing, the push's caller name for a pushed call. Unset when none of those had one. |
+| **`callUuid`**   | <code>string</code>                                     | The PBX call id, when known. Equal to `callId` when present.                                                                                                                                             |
+| **`answered`**   | <code>boolean</code>                                    | True once the call has been connected (`confirmed`) at any point.                                                                                                                                        |
+| **`end`**        | <code><a href="#callend">CallEnd</a></code>             | Set on the `disconnected` snapshot only.                                                                                                                                                                 |
+
+
+#### CallEnd
+
+How a call ended — facts only. What that means to a person ("declined",
+"busy", "no answer") is the app's to decide, from these and `answered`.
+
+| Prop            | Type                             | Description                                                                                                                                         |
+| --------------- | -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **`by`**        | <code>'local' \| 'remote'</code> | `local`: this device ended it (the app, the system call UI, a notification's Decline). `remote`: anything else — the far end, the PBX, the network. |
+| **`sipStatus`** | <code>number</code>              | The SIP status the call ended with (486 busy, 603 decline, 487 cancelled, 408 timeout, 200 after a BYE …), when the engine has one.                 |
+| **`sipReason`** | <code>string</code>              | The reason phrase that came with `sipStatus`.                                                                                                       |
 
 
 #### SipPermissionStatus
@@ -393,31 +400,12 @@ in-flight calls instead of orphaning them.
 | **`remove`** | <code>() =&gt; Promise&lt;void&gt;</code> |
 
 
-#### CallStateEvent
-
-| Prop            | Type                                            |
-| --------------- | ----------------------------------------------- |
-| **`callId`**    | <code>string</code>                             |
-| **`state`**     | <code><a href="#callstate">CallState</a></code> |
-| **`remoteUri`** | <code>string</code>                             |
-
-
 #### RegistrationStateEvent
 
 | Prop         | Type                                                            |
 | ------------ | --------------------------------------------------------------- |
 | **`state`**  | <code><a href="#registrationstate">RegistrationState</a></code> |
 | **`reason`** | <code>string</code>                                             |
-
-
-#### IncomingCallEvent
-
-| Prop             | Type                | Description                                                                                                                                                                                                                                                                     |
-| ---------------- | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **`callId`**     | <code>string</code> |                                                                                                                                                                                                                                                                                 |
-| **`remoteUri`**  | <code>string</code> |                                                                                                                                                                                                                                                                                 |
-| **`callerName`** | <code>string</code> |                                                                                                                                                                                                                                                                                 |
-| **`callUuid`**   | <code>string</code> | The PBX-side call identifier, lifted from the INVITE's `X-Redyrect-Call-UUID` header when present. Lets the client address this specific call via REST (decline/hangup) and correlate with the FCM push that announced it. Optional — older PBX versions don't emit the header. |
 
 
 #### PushTokenEvent
@@ -463,6 +451,13 @@ cannot occur, and narrowing it away was reported as a type error against
 accurate code.
 
 <code>'unregistered' | 'registering' | 'registered' | 'failed'</code>
+
+
+#### CallDirection
+
+Which side placed the call.
+
+<code>'incoming' | 'outgoing'</code>
 
 
 #### CallState

@@ -48,6 +48,15 @@ object CallController {
     private val reported = mutableSetOf<String>()
     /** Pushed calls whose INVITE hasn't arrived, with the give-up timer. */
     private val awaitingInvite = mutableMapOf<String, Runnable>()
+    /** The caller name each push carried, for an INVITE without one. */
+    private val pushedNames = mutableMapOf<String, String>()
+
+    /** Every call event the app gets — see `CallLedger`. Main thread. */
+    private val ledger = CallLedger { snapshot -> events?.emit("callUpdated", snapshot) }
+
+    private fun onMain(block: () -> Unit) {
+        if (Looper.myLooper() == Looper.getMainLooper()) block() else main.post(block)
+    }
 
     /** Start the SIP engine once per process. Idempotent: the plugin and the
      *  push service both call it, whichever runs first. */
@@ -115,6 +124,7 @@ object CallController {
                 if (error != null) pjsipLog("[CallController] push $callUuid: re-register failed: ${error.message}")
             }
         }
+        name?.let { pushedNames[callUuid] = it }
         if (callUuid in reported) return
         reportIncoming(callUuid, number, name)
         val giveUp = Runnable {
@@ -128,9 +138,13 @@ object CallController {
 
     // Calls
 
-    /** Place a call and report it to Telecom. */
-    fun makeCall(uri: String): String {
+    /** Place a call and report it to Telecom. [displayName] is who the app
+     *  is calling, for the call's snapshot and the system call UI. */
+    fun makeCall(uri: String, displayName: String?): String {
         val callId = sip().makeCall(uri)
+        onMain {
+            ledger.open(callId, incoming = false, state = "calling", remoteUri = uri, callerName = displayName)
+        }
         reportToTelecom(callId) { telecom, handle ->
             telecom.placeCall(telecomAddress(uri), Bundle().apply {
                 putString("callId", callId)
@@ -166,6 +180,7 @@ object CallController {
     /** The one way a call is ended from this side. */
     fun hangup(callId: String, cause: Int = DisconnectCause.LOCAL) {
         pjsipLog("[CallController] hangup $callId (cause $cause)")
+        onMain { ledger.endingHere(callId) }
         closeConnection(callId, cause)
         engine?.hangupCall(callId)
     }
@@ -184,7 +199,15 @@ object CallController {
     fun sendDtmf(callId: String, digit: String) = sip().sendDtmf(callId, digit)
     fun transfer(callId: String, target: String) = sip().transferCall(callId, target)
     fun setAudioRoute(route: String) = sip().setAudioRoute(route)
-    fun activeCalls(): List<Map<String, Any?>> = engine?.getActiveCalls() ?: emptyList()
+    /** Every live call, as the app's snapshots. Main thread, like the ledger. */
+    fun activeCalls(): List<Map<String, Any?>> {
+        if (Looper.myLooper() == Looper.getMainLooper()) return ledger.active()
+        val latch = java.util.concurrent.CountDownLatch(1)
+        var calls: List<Map<String, Any?>> = emptyList()
+        main.post { calls = ledger.active(); latch.countDown() }
+        latch.await()
+        return calls
+    }
 
     /** Update the caller name the system call UI shows, once the app has
      *  resolved the SIP handle to a real person. */
@@ -209,6 +232,7 @@ object CallController {
 
     private fun closeConnection(callId: String, cause: Int) {
         reported.remove(callId)
+        pushedNames.remove(callId)
         awaitingInvite.remove(callId)?.let { main.removeCallbacks(it) }
         appContext?.let { CallNotifications.cancel(it, callId) }
         connections.remove(callId)?.let { connection ->
@@ -224,28 +248,37 @@ object CallController {
             events?.emit("registrationStateChanged", mapOf("state" to state, "reason" to reason))
         }
 
-        override fun onCallStateChanged(callId: String, state: String, remoteUri: String?) {
-            events?.emit("callStateChanged", mapOf("callId" to callId, "state" to state, "remoteUri" to remoteUri))
-
+        override fun onCallStateChanged(
+            callId: String, state: String, remoteUri: String?,
+            incoming: Boolean, sipStatus: Int, sipReason: String?,
+        ) {
             // Telecom follows the SIP state from this one place; it is the
             // copy the system call UI, audio routing and the ongoing-call
             // notification read. A call ended from this side has already
-            // closed its connection, so this is a no-op then.
+            // closed its connection, so closing it again is a no-op.
             when (state) {
+                "disconnected" -> {
+                    ledger.finish(callId, sipStatus, sipReason)
+                    closeConnection(callId, DisconnectCause.REMOTE)
+                    return
+                }
                 "confirmed" -> connections[callId]?.setActive()
-                "disconnected" -> closeConnection(callId, DisconnectCause.REMOTE)
+                "held" -> connections[callId]?.setOnHold()
                 else -> Unit
             }
+            if (ledger.has(callId)) ledger.update(callId, state, remoteUri)
+            else ledger.open(callId, incoming, state, remoteUri)
         }
 
-        override fun onIncomingCall(callId: String, remoteUri: String, callerName: String?) {
+        override fun onIncomingCall(callId: String, remoteUri: String, callerName: String?, callUuid: String?) {
             awaitingInvite.remove(callId)?.let { main.removeCallbacks(it) }
+            val name = callerName ?: pushedNames[callId]
             if (callId in reported) {
-                callerName?.let { connections[callId]?.setCallerDisplayName(it, TelecomManager.PRESENTATION_ALLOWED) }
+                name?.let { connections[callId]?.setCallerDisplayName(it, TelecomManager.PRESENTATION_ALLOWED) }
             } else {
-                reportIncoming(callId, remoteUri, callerName)
+                reportIncoming(callId, remoteUri, name)
             }
-            events?.emit("incomingCall", mapOf("callId" to callId, "remoteUri" to remoteUri, "callerName" to callerName))
+            ledger.open(callId, incoming = true, state = "incoming", remoteUri = remoteUri, callerName = name, callUuid = callUuid)
         }
     }
 

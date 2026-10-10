@@ -16,9 +16,10 @@ import type {
   RegistrationState,
   CallState,
   AudioRoute,
-  ActiveCall,
+  CallSnapshot,
   SipPermissionStatus,
 } from './definitions';
+import { CallLedger } from './ledger';
 
 /**
  * SIP header the Redyrect PBX adds to inbound INVITEs carrying its own
@@ -36,6 +37,10 @@ export class PjsipWeb extends WebPlugin implements PjsipPlugin {
   private sessions: Map<string, Session> = new Map();
   private callIdCounter = 0;
   private registrationState: RegistrationState = 'unregistered';
+  /** Every call event goes out through here — see `CallLedger`. */
+  private readonly ledger = new CallLedger((snapshot) =>
+    this.notifyListeners('callUpdated', snapshot),
+  );
   async register(options: SipAccountConfig): Promise<void> {
     const port = options.port ?? 7443;
     const transport = options.transport ?? 'wss';
@@ -202,7 +207,7 @@ export class PjsipWeb extends WebPlugin implements PjsipPlugin {
     return { state: this.registrationState };
   }
 
-  async makeCall(options: { uri: string }): Promise<{ callId: string }> {
+  async makeCall(options: { uri: string; displayName?: string }): Promise<{ callId: string }> {
     if (!this.ua) {
       throw new Error('Not registered');
     }
@@ -228,12 +233,29 @@ export class PjsipWeb extends WebPlugin implements PjsipPlugin {
     // which would otherwise freeze the UI until the SDP is ready. The
     // session.stateChange listeners drive every subsequent state; a
     // failed invite is surfaced as 'disconnected' so the UI recovers.
-    this.notifyCallState(callId, 'calling', options.uri);
-    inviter.invite().catch((err) => {
-      console.error('[capacitor-pjsip] inviter.invite failed', err);
-      this.sessions.delete(callId);
-      this.notifyCallState(callId, 'disconnected', options.uri);
+    this.ledger.open({
+      callId,
+      direction: 'outgoing',
+      state: 'calling',
+      remoteUri: options.uri,
+      callerName: options.displayName,
     });
+    inviter
+      .invite({
+        requestDelegate: {
+          // The final response refusing the call (486 busy, 603 decline,
+          // 404 …) — what the call ended with.
+          onReject: (response) => {
+            const { statusCode, reasonPhrase } = response.message;
+            this.ledger.finish(callId, statusCode, reasonPhrase);
+          },
+        },
+      })
+      .catch((err) => {
+        console.error('[capacitor-pjsip] inviter.invite failed', err);
+        this.sessions.delete(callId);
+        this.ledger.finish(callId, undefined, String(err?.message ?? err));
+      });
 
     return { callId };
   }
@@ -263,6 +285,7 @@ export class PjsipWeb extends WebPlugin implements PjsipPlugin {
 
   async hangupCall(options: { callId: string }): Promise<void> {
     const session = this.getSession(options.callId);
+    this.ledger.endingHere(options.callId);
     switch (session.state) {
       case SessionState.Initial:
       case SessionState.Establishing:
@@ -287,25 +310,8 @@ export class PjsipWeb extends WebPlugin implements PjsipPlugin {
     // ongoing state to the user.
   }
 
-  async getActiveCalls(): Promise<{ calls: ActiveCall[] }> {
-    const calls: ActiveCall[] = [];
-    for (const [callId, session] of this.sessions) {
-      // Terminated sessions are pruned in setupSessionListeners, but
-      // guard anyway so a recovering client never re-adopts a dead call.
-      if (session.state === SessionState.Terminated) continue;
-      const state = this.mapSessionState(session.state, session) ?? 'connecting';
-      let remoteUri: string | undefined;
-      let callerName: string | undefined;
-      try {
-        remoteUri = session.remoteIdentity?.uri?.toString();
-        callerName = session.remoteIdentity?.displayName || undefined;
-      } catch {
-        // remoteIdentity can be unavailable very early in an Inviter's
-        // lifecycle — fine, the callId alone still makes it controllable.
-      }
-      calls.push({ callId, state, remoteUri, callerName });
-    }
-    return { calls };
+  async getActiveCalls(): Promise<{ calls: CallSnapshot[] }> {
+    return { calls: this.ledger.active() };
   }
 
   async holdCall(options: { callId: string; hold: boolean }): Promise<void> {
@@ -340,10 +346,7 @@ export class PjsipWeb extends WebPlugin implements PjsipPlugin {
       });
     }
 
-    this.notifyCallState(
-      options.callId,
-      options.hold ? 'held' : 'confirmed',
-    );
+    this.ledger.update(options.callId, options.hold ? 'held' : 'confirmed');
   }
 
   async muteCall(options: { callId: string; mute: boolean }): Promise<void> {
@@ -465,8 +468,10 @@ export class PjsipWeb extends WebPlugin implements PjsipPlugin {
         `displayName=${callerName || '(none)'}`,
     );
 
-    this.notifyListeners('incomingCall', {
+    this.ledger.open({
       callId,
+      direction: 'incoming',
+      state: 'incoming',
       remoteUri,
       callerName: callerName || undefined,
       callUuid,
@@ -485,7 +490,7 @@ export class PjsipWeb extends WebPlugin implements PjsipPlugin {
       );
       const mapped = this.mapSessionState(state, session);
       if (mapped) {
-        this.notifyCallState(callId, mapped);
+        this.ledger.update(callId, mapped);
       }
       if (state === SessionState.Terminated) {
         this.sessions.delete(callId);
@@ -515,11 +520,11 @@ export class PjsipWeb extends WebPlugin implements PjsipPlugin {
     session.delegate = {
       onBye: () => {
         console.info(`[capacitor-pjsip] onBye ${callId} (remote hangup)`);
-        this.notifyCallState(callId, 'disconnected');
+        this.ledger.finish(callId);
       },
       onCancel: () => {
         console.info(`[capacitor-pjsip] onCancel ${callId} (remote cancel)`);
-        this.notifyCallState(callId, 'disconnected');
+        this.ledger.finish(callId, 487, 'Request Terminated');
       },
     };
   }
@@ -553,7 +558,7 @@ export class PjsipWeb extends WebPlugin implements PjsipPlugin {
             `treating as remote hangup`,
         );
         pc.removeEventListener('connectionstatechange', handler);
-        this.notifyCallState(callId, 'disconnected');
+        this.ledger.finish(callId, undefined, `media ${s}`);
         // Authoritative cleanup happens via stateChange→Terminated in
         // setupSessionListeners. Try to send BYE on our end so the
         // PBX cleans up its leg too — best-effort, session may
@@ -619,7 +624,7 @@ export class PjsipWeb extends WebPlugin implements PjsipPlugin {
       ) {
         return;
       }
-      this.notifyCallState(callId, held ? 'held' : 'confirmed');
+      this.ledger.update(callId, held ? 'held' : 'confirmed');
     };
     pc.addEventListener('signalingstatechange', evaluate);
     // Sample once at install time too — covers the case where a
@@ -654,14 +659,6 @@ export class PjsipWeb extends WebPlugin implements PjsipPlugin {
       default:
         return null;
     }
-  }
-
-  private notifyCallState(
-    callId: string,
-    state: CallState,
-    remoteUri?: string,
-  ): void {
-    this.notifyListeners('callStateChanged', { callId, state, remoteUri });
   }
 
   private updateRegistrationState(state: RegistrationState, reason?: string): void {

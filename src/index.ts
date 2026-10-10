@@ -7,4 +7,5 @@ const Pjsip = registerPlugin<PjsipPlugin>('Pjsip', {
 });
 
 export * from './definitions';
+export { CallLedger } from './ledger';
 export { Pjsip };

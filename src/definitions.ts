@@ -105,27 +105,60 @@ export interface SipAccountConfig {
 
 // --- Events ---
 
-export interface CallStateEvent {
-  callId: string;
-  state: CallState;
-  remoteUri?: string;
-}
-
 export interface RegistrationStateEvent {
   state: RegistrationState;
   reason?: string;
 }
 
-export interface IncomingCallEvent {
+/** Which side placed the call. */
+export type CallDirection = 'incoming' | 'outgoing';
+
+/**
+ * How a call ended — facts only. What that means to a person ("declined",
+ * "busy", "no answer") is the app's to decide, from these and `answered`.
+ */
+export interface CallEnd {
+  /** `local`: this device ended it (the app, the system call UI, a
+   *  notification's Decline). `remote`: anything else — the far end, the
+   *  PBX, the network. */
+  by: 'local' | 'remote';
+  /** The SIP status the call ended with (486 busy, 603 decline, 487
+   *  cancelled, 408 timeout, 200 after a BYE …), when the engine has one. */
+  sipStatus?: number;
+  /** The reason phrase that came with `sipStatus`. */
+  sipReason?: string;
+}
+
+/**
+ * A call, whole. The one event every platform sends (`callUpdated`), every
+ * time anything about the call changes, and what `getActiveCalls` returns.
+ *
+ * Every platform keeps these rules, so a consumer never has to repair them:
+ *   • One `callId` for the call's whole life — the PBX call id
+ *     (`X-Redyrect-Call-UUID`) when the INVITE carries one.
+ *   • Fields are only ever added: a later snapshot never drops the caller
+ *     name or URI an earlier one carried.
+ *   • `disconnected` is sent exactly once, with `end`, and nothing is sent
+ *     for that call afterwards.
+ */
+export interface CallSnapshot {
   callId: string;
+  direction: CallDirection;
+  state: CallState;
+  /** The other party as SIP gave it, display name included when present
+   *  (`"Ann Lee" <sip:uid@host>`). Empty only for a pushed call whose
+   *  INVITE hasn't arrived and whose push had no number. */
   remoteUri: string;
+  /** The other party's name as SIP gave it: the INVITE's From display name
+   *  for incoming, the dialer's `displayName` for outgoing, the push's
+   *  caller name for a pushed call. Unset when none of those had one. */
   callerName?: string;
-  /** The PBX-side call identifier, lifted from the INVITE's
-   *  `X-Redyrect-Call-UUID` header when present. Lets the client
-   *  address this specific call via REST (decline/hangup) and correlate
-   *  with the FCM push that announced it. Optional — older PBX versions
-   *  don't emit the header. */
+  /** The PBX call id, when known. Equal to `callId` when present. */
   callUuid?: string;
+  /** True once the call has been connected (`confirmed`) at any point. */
+  answered: boolean;
+  /** Set on the `disconnected` snapshot only. */
+  end?: CallEnd;
 }
 
 export interface PushTokenEvent {
@@ -141,19 +174,6 @@ export interface PushTokenEvent {
 }
 
 // --- Recovery ---
-
-/**
- * A call the engine currently knows about. Returned by `getActiveCalls`
- * so a client that lost its in-memory state (web hot-reload, native
- * background→resume after the OS reclaimed the webview) can re-adopt
- * in-flight calls instead of orphaning them.
- */
-export interface ActiveCall {
-  callId: string;
-  state: CallState;
-  remoteUri?: string;
-  callerName?: string;
-}
 
 // --- Plugin Interface ---
 
@@ -182,7 +202,7 @@ export interface PjsipPlugin {
    * recovery: a freshly-(re)loaded client queries this on init and
    * re-adopts any in-flight call so it stays controllable.
    */
-  getActiveCalls(): Promise<{ calls: ActiveCall[] }>;
+  getActiveCalls(): Promise<{ calls: CallSnapshot[] }>;
 
   // In-call controls
   holdCall(options: { callId: string; hold: boolean }): Promise<void>;
@@ -214,17 +234,14 @@ export interface PjsipPlugin {
   unregisterPush(): Promise<void>;
 
   // Events
+  /** Every change to every call, as a whole `CallSnapshot`. */
   addListener(
-    event: 'callStateChanged',
-    listener: (data: CallStateEvent) => void,
+    event: 'callUpdated',
+    listener: (data: CallSnapshot) => void,
   ): Promise<PluginListenerHandle>;
   addListener(
     event: 'registrationStateChanged',
     listener: (data: RegistrationStateEvent) => void,
-  ): Promise<PluginListenerHandle>;
-  addListener(
-    event: 'incomingCall',
-    listener: (data: IncomingCallEvent) => void,
   ): Promise<PluginListenerHandle>;
   addListener(
     event: 'pushTokenUpdated',

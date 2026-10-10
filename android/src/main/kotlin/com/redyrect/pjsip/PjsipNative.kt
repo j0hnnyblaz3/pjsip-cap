@@ -16,7 +16,9 @@ object PjsipNative {
         fun onRegState(state: String, reason: String?)
         /** [callUuid] is the INVITE's X-Redyrect-Call-UUID, empty when absent. */
         fun onIncomingCall(pjCallId: Int, remoteUri: String, callUuid: String)
-        fun onCallState(pjCallId: Int, state: String, remoteUri: String)
+        /** [incoming]: this phone was called. [sipStatus]/[sipReason]: the last
+         *  SIP status the call reached (0/empty before any). */
+        fun onCallState(pjCallId: Int, state: String, remoteUri: String, incoming: Boolean, sipStatus: Int, sipReason: String)
     }
 
     @JvmStatic external fun init(callback: Callback): Int

@@ -42,9 +42,7 @@ class PjsipPlugin : Plugin() {
         CallController.start(context)
         CallController.events = object : CallEventSink {
             override fun emit(event: String, data: Map<String, Any?>) {
-                notifyListeners(event, JSObject().apply {
-                    for ((key, value) in data) value?.let { put(key, it) }
-                })
+                notifyListeners(event, toJs(data))
             }
         }
     }
@@ -141,7 +139,7 @@ class PjsipPlugin : Plugin() {
         val uri = call.getString("uri") ?: return call.reject("Missing uri")
 
         try {
-            val callId = CallController.makeCall(uri)
+            val callId = CallController.makeCall(uri, call.getString("displayName"))
             call.resolve(JSObject().apply { put("callId", callId) })
         } catch (e: Exception) {
             call.reject(e.message ?: "Cannot place the call")
@@ -197,11 +195,7 @@ class PjsipPlugin : Plugin() {
     @PluginMethod
     fun getActiveCalls(call: PluginCall) {
         val arr = JSArray()
-        for (c in CallController.activeCalls()) {
-            val o = JSObject()
-            for ((k, v) in c) o.put(k, v)
-            arr.put(o)
-        }
+        for (c in CallController.activeCalls()) arr.put(toJs(c))
         call.resolve(JSObject().apply { put("calls", arr) })
     }
 
@@ -268,6 +262,21 @@ class PjsipPlugin : Plugin() {
             } else {
                 call.reject("Failed to delete FCM token: ${task.exception?.message}")
             }
+        }
+    }
+}
+
+/** An event's map as the JS object it describes; nested maps (a snapshot's
+ *  `end`) become objects too, not their toString. Nulls are left out. */
+private fun toJs(data: Map<String, Any?>): JSObject = JSObject().apply {
+    for ((key, value) in data) {
+        when (value) {
+            null -> Unit
+            is Map<*, *> -> {
+                @Suppress("UNCHECKED_CAST")
+                put(key, toJs(value as Map<String, Any?>))
+            }
+            else -> put(key, value)
         }
     }
 }

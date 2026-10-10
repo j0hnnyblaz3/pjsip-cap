@@ -23,6 +23,12 @@ final class CallController: NSObject {
     private let sip: SipManager
     private let callKit: CallKitManager
     private let push: PushManager
+    /// Every call event the app gets — see `CallLedger`. Main thread.
+    private lazy var ledger = CallLedger { [weak self] snapshot in
+        self?.events?.emit(event: "callUpdated", data: snapshot)
+    }
+    /// The caller name each VoIP push carried, for an INVITE without one.
+    private var pushedNames: [String: String] = [:]
 
     override init() {
         sip = SipManager.shared
@@ -59,6 +65,9 @@ final class CallController: NSObject {
     /// shows instead of the raw SIP URI.
     func makeCall(uri: String, displayName: String?) throws -> String {
         let callId = try sip.makeCall(uri: uri)
+        onMain { [self] in
+            ledger.open(callId: callId, incoming: false, state: "calling", remoteUri: uri, callerName: displayName)
+        }
         callKit.reportOutgoingCall(callId: callId, handle: uri, callerName: displayName)
         return callId
     }
@@ -72,6 +81,7 @@ final class CallController: NSObject {
     /// took (its report failed) is still ended — in SIP directly — so a
     /// hangup can never leave a call up.
     func end(callId: String, completion: @escaping () -> Void) {
+        onMain { [self] in ledger.endingHere(callId: callId) }
         callKit.requestEnd(callId: callId) { [weak self] error in
             if error != nil {
                 pjsipLog("[CallController] end \(callId): CallKit refused — ending the SIP call directly")
@@ -104,7 +114,17 @@ final class CallController: NSObject {
     func sendDtmf(callId: String, digit: String) { sip.sendDtmf(callId: callId, digit: digit) }
     func transfer(callId: String, target: String) { sip.transferCall(callId: callId, target: target) }
     func setAudioRoute(_ route: String) { sip.setAudioRoute(route: route) }
-    func activeCalls() -> [[String: Any]] { sip.getActiveCalls() }
+    /// Every live call, as the app's snapshots — from the ledger, so it never
+    /// touches pjsua (whose thread checks aborted the app when this ran on
+    /// the bridge thread).
+    func activeCalls() -> [[String: Any]] {
+        if Thread.isMainThread { return ledger.active() }
+        return DispatchQueue.main.sync { ledger.active() }
+    }
+
+    private func onMain(_ block: @escaping () -> Void) {
+        if Thread.isMainThread { block() } else { DispatchQueue.main.async(execute: block) }
+    }
 
     func updateCallDisplay(callId: String, displayName: String?) {
         callKit.updateCallDisplay(callId: callId, callerName: displayName)
@@ -122,13 +142,8 @@ extension CallController: SipManagerDelegate {
         events?.emit(event: "registrationStateChanged", data: data)
     }
 
-    func onCallStateChanged(callId: String, state: String, remoteUri: String?) {
-        var data: [String: Any] = ["callId": callId, "state": state]
-        if let remoteUri = remoteUri {
-            data["remoteUri"] = remoteUri
-        }
-        events?.emit(event: "callStateChanged", data: data)
-
+    func onCallStateChanged(callId: String, state: String, remoteUri: String?,
+                            incoming: Bool, sipStatus: Int, sipReason: String?) {
         // CallKit follows the SIP state from this one place:
         //   confirmed    → reportCallConnected (outbound: live timer)
         //   disconnected → reportCallEnded (clears the call, finalizes the
@@ -139,25 +154,25 @@ extension CallController: SipManagerDelegate {
         case "confirmed":
             callKit.reportCallConnected(callId: callId)
         case "disconnected":
+            ledger.finish(callId: callId, sipStatus: sipStatus, sipReason: sipReason)
+            pushedNames.removeValue(forKey: callId)
             callKit.reportCallEnded(callId: callId)
+            return
         default:
             break
+        }
+        if ledger.has(callId) {
+            ledger.update(callId: callId, state: state, remoteUri: remoteUri)
+        } else {
+            ledger.open(callId: callId, incoming: incoming, state: state, remoteUri: remoteUri)
         }
     }
 
     func onIncomingCall(callId: String, remoteUri: String, callerName: String?, callUuid: String?) {
-        callKit.reportIncomingCall(callId: callId, handle: remoteUri, callerName: callerName)
-
-        var data: [String: Any] = ["callId": callId, "remoteUri": remoteUri]
-        if let callerName = callerName {
-            data["callerName"] = callerName
-        }
-        // The INVITE's X-Redyrect-Call-UUID; equal to callId when present,
-        // emitted anyway so JS need not know that rule (web does the same).
-        if let callUuid = callUuid {
-            data["callUuid"] = callUuid
-        }
-        events?.emit(event: "incomingCall", data: data)
+        let name = callerName ?? pushedNames[callId]
+        callKit.reportIncomingCall(callId: callId, handle: remoteUri, callerName: name)
+        ledger.open(callId: callId, incoming: true, state: "incoming",
+                    remoteUri: remoteUri, callerName: name, callUuid: callUuid)
     }
 }
 
@@ -174,6 +189,9 @@ extension CallController: PushManagerDelegate {
         //      suspended, so the PBX's contact is stale and the INVITE would
         //      have nowhere to go.
         if let uuid = payload["call_uuid"] as? String {
+            if let name = payload["caller_id_name"] as? String, !name.isEmpty {
+                pushedNames[uuid] = name
+            }
             sip.expectIncomingCall(callUuid: uuid)
         }
         sip.forceRegister()
@@ -204,6 +222,8 @@ extension CallController: CallKitManagerDelegate {
     }
 
     func callKitDidEndCall(callId: String) {
+        // The system End/Decline button reaches here without `end`.
+        ledger.endingHere(callId: callId)
         sip.hangupCall(callId: callId)
     }
 

@@ -158,18 +158,17 @@ static void on_incoming_call(pjsua_acc_id acc_id, pjsua_call_id call_id,
     pjsua_call_answer(call_id, 180, NULL, NULL);
 }
 
-static void on_call_state(pjsua_call_id call_id, pjsip_event *e) {
-    PJ_UNUSED_ARG(e);
-
+/* Report call [call_id] to Kotlin as it stands now: the state the app
+ * sees (held included), which side placed it, and the SIP status it has
+ * reached. The one report for both PJSIP callbacks, so a hold that changes
+ * only the media is reported like any other change — as on iOS. */
+static void report_call(pjsua_call_id call_id) {
     /* pjsua invalidates the call before/while delivering the terminal
      * DISCONNECTED transition, so pjsua_call_get_info() routinely fails
-     * exactly here. Treating that failure as "nothing happened" is what
-     * used to strand the UI on a live call after the remote hung up.
-     *
-     * The invocation itself is the authoritative signal: pjsua called us
-     * for this call_id, so something changed. If we cannot read the call,
-     * the only thing it can be is gone. Never report "unknown" — every
-     * consumer (JS, Telecom) treats a non-terminal state as "still up". */
+     * exactly here. The invocation itself is the authoritative signal:
+     * pjsua called us for this call, so something changed. If we cannot
+     * read the call, the only thing it can be is gone. Never report
+     * "unknown" — every consumer treats a non-terminal state as "still up". */
     pjsua_call_info ci;
     pj_bzero(&ci, sizeof(ci));
 
@@ -188,18 +187,18 @@ static void on_call_state(pjsua_call_id call_id, pjsip_event *e) {
             case PJSIP_INV_STATE_EARLY:
                 /* EARLY means opposite things by direction. Outbound: the far
                  * end is ringing. Inbound: we answered the INVITE with 180
-                 * Ringing and the call is still waiting to be picked up. The
-                 * consumer must draw a ringing call with an Answer button for
-                 * the latter, so report it as "incoming" rather than leaking
-                 * a string that looks identical to an outbound call.
-                 *
-                 * ci.role is authoritative and available on the FIRST event,
-                 * unlike tracking direction from the incoming-call callback,
-                 * which pjsip delivers AFTER this one. */
+                 * Ringing and the call is still waiting to be picked up, which
+                 * the app must draw with an Answer button. */
                 state = (ci.role == PJSIP_ROLE_UAS) ? "incoming" : "early";
                 break;
             case PJSIP_INV_STATE_CONNECTING:    state = "connecting"; break;
-            case PJSIP_INV_STATE_CONFIRMED:     state = "confirmed"; break;
+            case PJSIP_INV_STATE_CONFIRMED:
+                /* PJSIP has no held inv state: a held call stays CONFIRMED
+                 * and the hold lives in the media status. */
+                state = (ci.media_status == PJSUA_CALL_MEDIA_LOCAL_HOLD ||
+                         ci.media_status == PJSUA_CALL_MEDIA_REMOTE_HOLD)
+                            ? "held" : "confirmed";
+                break;
             case PJSIP_INV_STATE_DISCONNECTED:  state = "disconnected"; break;
             /* An inv_state pjsua added after this was written. Reporting it
              * as still-up would strand the call; disconnected is the safe
@@ -212,13 +211,18 @@ static void on_call_state(pjsua_call_id call_id, pjsip_event *e) {
         }
     }
 
-    char remote_info[256];
-    if (status == PJ_SUCCESS && ci.remote_info.slen > 0) {
-        snprintf(remote_info, sizeof(remote_info), "%.*s",
-                 (int)ci.remote_info.slen, ci.remote_info.ptr);
-    } else {
-        remote_info[0] = '\0';
+    char remote_info[256] = "";
+    char last_reason[128] = "";
+    if (status == PJ_SUCCESS) {
+        if (ci.remote_info.slen > 0)
+            snprintf(remote_info, sizeof(remote_info), "%.*s",
+                     (int)ci.remote_info.slen, ci.remote_info.ptr);
+        if (ci.last_status_text.slen > 0)
+            snprintf(last_reason, sizeof(last_reason), "%.*s",
+                     (int)ci.last_status_text.slen, ci.last_status_text.ptr);
     }
+    jboolean incoming = (status == PJ_SUCCESS && ci.role == PJSIP_ROLE_UAS);
+    jint last_status = (status == PJ_SUCCESS) ? (jint)ci.last_status : 0;
 
     int need_detach;
     JNIEnv *env = get_env(&need_detach);
@@ -226,27 +230,43 @@ static void on_call_state(pjsua_call_id call_id, pjsip_event *e) {
 
     jstring jstate = (*env)->NewStringUTF(env, state);
     jstring jremote = (*env)->NewStringUTF(env, remote_info);
+    jstring jreason = (*env)->NewStringUTF(env, last_reason);
 
     jclass cls = (*env)->GetObjectClass(env, g_callback);
     jmethodID mid = (*env)->GetMethodID(env, cls, "onCallState",
-        "(ILjava/lang/String;Ljava/lang/String;)V");
+        "(ILjava/lang/String;Ljava/lang/String;ZILjava/lang/String;)V");
     if (mid) {
-        (*env)->CallVoidMethod(env, g_callback, mid, (jint)call_id, jstate, jremote);
+        (*env)->CallVoidMethod(env, g_callback, mid, (jint)call_id, jstate, jremote,
+                               incoming, last_status, jreason);
     }
     (*env)->DeleteLocalRef(env, cls);
     (*env)->DeleteLocalRef(env, jstate);
     (*env)->DeleteLocalRef(env, jremote);
+    (*env)->DeleteLocalRef(env, jreason);
     release_env(need_detach);
+}
+
+static void on_call_state(pjsua_call_id call_id, pjsip_event *e) {
+    PJ_UNUSED_ARG(e);
+    report_call(call_id);
 }
 
 static void on_call_media_state(pjsua_call_id call_id) {
     pjsua_call_info ci;
-    pjsua_call_get_info(call_id, &ci);
+    if (pjsua_call_get_info(call_id, &ci) != PJ_SUCCESS) return;
 
+    /* Wire the call to the sound device while its media is active; take it
+     * off while held, so a held call is silent and a second call can have
+     * the device to itself. */
     if (ci.media_status == PJSUA_CALL_MEDIA_ACTIVE) {
         pjsua_conf_connect(ci.conf_slot, 0);
         pjsua_conf_connect(0, ci.conf_slot);
+    } else if (ci.conf_slot != PJSUA_INVALID_ID) {
+        pjsua_conf_disconnect(ci.conf_slot, 0);
+        pjsua_conf_disconnect(0, ci.conf_slot);
     }
+    /* A hold or resume changes only the media; report it. */
+    report_call(call_id);
 }
 
 /* ---- JNI Methods ---- */
