@@ -35,6 +35,8 @@ extern JavaVM *pj_jni_jvm;
 #define g_vm pj_jni_jvm
 static jobject g_callback = NULL;
 static pjsua_acc_id g_acc_id = PJSUA_INVALID_ID;
+/* The SIP transport the account is bound to (createTransport). */
+static pjsua_transport_id g_tid = PJSUA_INVALID_ID;
 static int g_started = 0;
 
 /* Helper: get JNIEnv for the current thread, attaching if needed */
@@ -316,6 +318,7 @@ Java_com_redyrect_pjsip_PjsipNative_init(JNIEnv *env, jclass cls, jobject callba
     if (status != PJ_SUCCESS) {
         LOGE("pjsua_init failed: %d", status);
         pjsua_destroy();
+        g_tid = PJSUA_INVALID_ID;
         return status;
     }
 
@@ -335,10 +338,10 @@ Java_com_redyrect_pjsip_PjsipNative_createTransport(JNIEnv *env, jclass cls, jin
     pjsua_transport_config tcfg;
     pjsua_transport_config_default(&tcfg);
 
-    pjsua_transport_id tid;
-    pj_status_t status = pjsua_transport_create(tp, &tcfg, &tid);
+    pj_status_t status = pjsua_transport_create(tp, &tcfg, &g_tid);
     if (status != PJ_SUCCESS) {
         LOGE("pjsua_transport_create failed: %d", status);
+        g_tid = PJSUA_INVALID_ID;
     }
     return status;
 }
@@ -349,6 +352,7 @@ Java_com_redyrect_pjsip_PjsipNative_start(JNIEnv *env, jclass cls) {
     if (status != PJ_SUCCESS) {
         LOGE("pjsua_start failed: %d", status);
         pjsua_destroy();
+        g_tid = PJSUA_INVALID_ID;
         g_started = 0;
     }
     return status;
@@ -393,6 +397,15 @@ Java_com_redyrect_pjsip_PjsipNative_addAccount(JNIEnv *env, jclass cls,
         acc_cfg.proxy[0] = pj_str((char*)proxy);
     }
 
+    /* Bind the account to its transport, as iOS does. Every request of the
+     * account — in-dialog ones included — then leaves on it, i.e. on the TLS
+     * connection to the SBC. Unbound, a BYE followed the SBC's
+     * Record-Route (no ;transport) to UDP, which this phone has no transport
+     * for: the BYE was never sent and the other phone stayed in the call. */
+    if (g_tid != PJSUA_INVALID_ID) {
+        acc_cfg.transport_id = g_tid;
+    }
+
     acc_cfg.reg_retry_interval = 300;
     acc_cfg.reg_first_retry_interval = 30;
 
@@ -423,6 +436,7 @@ JNIEXPORT void JNICALL
 Java_com_redyrect_pjsip_PjsipNative_destroy(JNIEnv *env, jclass cls) {
     if (g_started) {
         pjsua_destroy();
+        g_tid = PJSUA_INVALID_ID;
         g_started = 0;
         g_acc_id = PJSUA_INVALID_ID;
     }

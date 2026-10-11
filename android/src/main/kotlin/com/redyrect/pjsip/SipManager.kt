@@ -193,7 +193,13 @@ class SipManager(private val context: Context) {
                 }
 
                 val sipUri = "sip:${config.username}@${config.domain}"
-                val regUri = "sip:${config.server}:${config.port}"
+                // Tagged with the transport, as on iOS: untagged, PJSIP takes
+                // a SIP URI to mean UDP.
+                val regUri = when (config.transport.lowercase()) {
+                    "tls", "wss" -> "sip:${config.server}:${config.port};transport=tls"
+                    "tcp" -> "sip:${config.server}:${config.port};transport=tcp"
+                    else -> "sip:${config.server}:${config.port}"
+                }
                 val proxy = config.proxy?.let {
                     if (it.isNotEmpty()) it else null
                 }
