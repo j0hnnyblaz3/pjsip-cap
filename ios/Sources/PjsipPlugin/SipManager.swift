@@ -36,6 +36,11 @@ struct SipConfig {
     /// 'disabled' | 'optional' | 'mandatory'. nil leaves pjsua's default —
     /// the policy is the app's setting (Admin → VoIP), not the plugin's.
     let srtpPolicy: String?
+    /// How the engine runs, from the PBX (/me/sip-config).
+    let registerExpiresSec: Int
+    let keepAliveSec: Int
+    /// Encoding names in preference order (OPUS, G722, PCMU …).
+    let codecs: [String]
 }
 
 protocol SipManagerDelegate: AnyObject {
@@ -662,31 +667,17 @@ class SipManager: NSObject {
         _ = pjsua_set_no_snd_dev()
         pjsipLog("[SipManager] startPjsua: detached sound device")
 
-        // After pjsua_start, the codec subsystem is initialized and we
-        // can enumerate + reprioritize. Without this, PJSIP offers its
-        // full compiled-in codec list (PCMU, PCMA, G722, iLBC, GSM,
-        // several speex variants, L16 at multiple sample rates, opus
-        // when enabled, telephone-event) — fine for SIP↔SIP but
-        // unfriendly to PSTN gateways behind dSIPRouter / similar
-        // SBCs, which can respond 488 Not Acceptable Here / Q.850
-        // cause 88 INCOMPATIBLE_DESTINATION when the offer is too
-        // broad or contains profiles their carrier link can't match.
-        configureCodecs()
+        // Codecs are applied with the account (addAccount), from the
+        // PBX's list.
     }
 
-    /// Narrow the offered codec set to what PSTN trunks and modern
-    /// SBCs actually negotiate cleanly. Priority order:
-    ///   1. PCMU/8000   (G.711 μ-law)  — universal PSTN
-    ///   2. PCMA/8000   (G.711 a-law)  — universal PSTN (EU origin)
-    ///   3. G722/8000   (wideband HD)  — when both legs support it
-    ///   4. opus/48000  (WebRTC interop) — for SBC bridges to web clients
-    ///   5. telephone-event/8000 — DTMF, must stay enabled
-    /// Everything else disabled. To add a codec back, bump its
-    /// priority above 0 here.
-    private func configureCodecs() {
-        // Enumerate first so the log shows what's actually available
-        // in this PJSIP build — invaluable for diagnosing "why is
-        // codec X missing from my SDP offer".
+    /// Offer exactly the PBX's codecs, in its order, and nothing else.
+    /// PJSIP's full compiled-in list (iLBC, GSM, speex variants, L16 …) is
+    /// unfriendly to PSTN gateways behind SBCs, which answer a broad offer
+    /// with 488 / Q.850 88. A PJSIP codec id is `name/rate[/channels]`; a
+    /// listed name enables every rate of it. Codec priorities are global to
+    /// pjsua, so this runs on every register.
+    private func configureCodecs(_ wanted: [String]) {
         var codecCount: pj_uint32_t = 64
         var codecs = Array(repeating: pjsua_codec_info(), count: 64)
         let enumStatus = pjsua_enum_codecs(&codecs, &codecCount)
@@ -694,51 +685,26 @@ class SipManager: NSObject {
             pjsipLog("[SipManager] pjsua_enum_codecs failed status=\(enumStatus)")
             return
         }
-
-        pjsipLog("[SipManager] PJSIP compiled-in codecs (\(codecCount)):")
-        for i in 0..<Int(codecCount) {
-            let id = pjStringToSwift(codecs[i].codec_id)
-            pjsipLog("  - \(id) (default priority=\(codecs[i].priority))")
-        }
-
-        // Apply priorities. Codec IDs are case-sensitive in pjsua —
-        // they're matched against the registered factory names.
-        let priorities: [(String, UInt8)] = [
-            ("PCMU/8000", 240),
-            ("PCMA/8000", 230),
-            ("G722/8000", 220),
-            ("opus/48000", 210),
-            ("telephone-event/8000", 200),
-        ]
-
-        // First pass: disable everything by setting priority to 0.
-        // We re-enable the wanted ones in the second pass. Doing it
-        // this way means new codecs that appear in future PJSIP
-        // versions are off by default — safer than allow-listing
-        // every possible new codec name.
+        var enabled: [String] = []
         for i in 0..<Int(codecCount) {
             var id = codecs[i].codec_id
-            let status = pjsua_codec_set_priority(&id, 0)
-            if status != Int32(PJ_SUCCESS.rawValue) {
-                pjsipLog("[SipManager] disable codec failed for \(pjStringToSwift(id)) status=\(status)")
-            }
+            let codecId = pjStringToSwift(id)
+            let name = codecId.split(separator: "/").first.map(String.init) ?? codecId
+            let rank = wanted.firstIndex { $0.caseInsensitiveCompare(name) == .orderedSame }
+            let priority: UInt8 = rank.map { UInt8(max(1, 250 - $0 * 10)) } ?? 0
+            pjsua_codec_set_priority(&id, priority)
+            if priority > 0 { enabled.append("\(codecId)=\(priority)") }
         }
-
-        // Second pass: re-enable the wanted ones with priority.
-        for (name, prio) in priorities {
-            var id = pj_str_from_swift(name)
-            let status = pjsua_codec_set_priority(&id, prio)
-            if status == Int32(PJ_SUCCESS.rawValue) {
-                pjsipLog("[SipManager] codec enabled: \(name) priority=\(prio)")
-            } else {
-                // Not a hard failure — the codec may not be compiled
-                // into this PJSIP build. e.g. opus is conditional.
-                pjsipLog("[SipManager] codec \(name) not available (status=\(status))")
-            }
+        let missing = wanted.filter { want in
+            !enabled.contains { $0.lowercased().hasPrefix(want.lowercased() + "/") }
         }
+        pjsipLog("[SipManager] codecs offered: \(enabled.joined(separator: ", "))"
+            + (missing.isEmpty ? "" : " — not in this PJSIP build: \(missing.joined(separator: ", "))"))
     }
 
     private func addAccount(config: SipConfig) throws {
+        configureCodecs(config.codecs)
+
         // Idempotent — every call to pjsua_acc_add consumes a slot
         // from PJSUA_MAX_ACC (8 by default). The JS layer calls
         // register() on every reconnect / resume; without this guard,
@@ -823,29 +789,16 @@ class SipManager: NSObject {
         accCfg.reg_retry_interval = 300
         accCfg.reg_first_retry_interval = 30
 
-        // Tighten the registration refresh cycle and add SIP-level
-        // keep-alive, mirroring the web sip.js fix:
-        //
-        //   reg_timeout=180  →  refresh REGISTER every ~3 minutes
-        //     instead of PJSIP's default 3600s (1 hour). The SBC
-        //     drops stale contacts faster after a real network loss
-        //     (no "phone rings but no audio" ghost-contact window),
-        //     and we detect upstream auth/policy drift within minutes
-        //     rather than within an hour.
-        //
-        //   ka_interval=30  →  PJSIP sends a SIP-level CRLF ping on
-        //     the registration transport every 30s. Required to keep
-        //     idle TLS sockets alive through aggressive corporate
-        //     NAT / proxies / some mobile carriers that close idle
-        //     TCP connections within 60-90s. Without it, the TLS
-        //     socket goes silent and dies while we look-registered-
-        //     but-aren't until the next REGISTER refresh notices.
-        //
-        // These match what web/sip.js sets (keepAliveInterval=30 +
-        // expires=180) — same defenses, same numbers, both ends of
-        // the client behave identically against the SBC.
-        accCfg.reg_timeout = 180
-        accCfg.ka_interval = 30
+        // How often to refresh REGISTER and ping the registration
+        // connection: the PBX's numbers (/me/sip-config), the same ones
+        // web and Android use. Short refreshes let the SBC drop a vanished
+        // phone's contact quickly; the pings keep idle TLS sockets alive
+        // through NATs and carriers that close them within a minute.
+        accCfg.reg_timeout = UInt32(config.registerExpiresSec)
+        accCfg.ka_interval = UInt32(config.keepAliveSec)
+        // Refresh halfway through, as web does (refreshFrequency 50): a
+        // failed refresh still has time to retry before the SBC purges us.
+        accCfg.reg_delay_before_refresh = UInt32(config.registerExpiresSec / 2)
 
         var accId: pjsua_acc_id = -1
         let status = pjsua_acc_add(&accCfg, pj_bool_t(1), &accId)

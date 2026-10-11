@@ -27,8 +27,10 @@ object PjsipNative {
     @JvmStatic external fun addAccount(
         sipUri: String, regUri: String, realm: String,
         username: String, password: String, proxy: String?,
-        srtp: Int
+        srtp: Int, registerExpiresSec: Int, keepAliveSec: Int
     ): Int
+    /** Offer exactly these codecs (encoding names, preference order). */
+    @JvmStatic external fun setCodecs(names: Array<String>)
     @JvmStatic external fun removeAccount()
     @JvmStatic external fun destroy()
 

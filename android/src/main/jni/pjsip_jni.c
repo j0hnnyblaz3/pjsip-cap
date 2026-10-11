@@ -361,7 +361,8 @@ Java_com_redyrect_pjsip_PjsipNative_start(JNIEnv *env, jclass cls) {
 JNIEXPORT jint JNICALL
 Java_com_redyrect_pjsip_PjsipNative_addAccount(JNIEnv *env, jclass cls,
     jstring jsipUri, jstring jregUri, jstring jrealm,
-    jstring jusername, jstring jpassword, jstring jproxy, jint jsrtp) {
+    jstring jusername, jstring jpassword, jstring jproxy, jint jsrtp,
+    jint jregExpires, jint jkeepAlive) {
 
     const char *sip_uri = (*env)->GetStringUTFChars(env, jsipUri, NULL);
     const char *reg_uri = (*env)->GetStringUTFChars(env, jregUri, NULL);
@@ -408,6 +409,12 @@ Java_com_redyrect_pjsip_PjsipNative_addAccount(JNIEnv *env, jclass cls,
 
     acc_cfg.reg_retry_interval = 300;
     acc_cfg.reg_first_retry_interval = 30;
+    /* How often to refresh REGISTER and ping the registration connection:
+     * the PBX's numbers (/me/sip-config), the same ones iOS and web use. */
+    acc_cfg.reg_timeout = (unsigned)jregExpires;
+    acc_cfg.ka_interval = (unsigned)jkeepAlive;
+    /* Refresh halfway through, as web does (refreshFrequency 50). */
+    acc_cfg.reg_delay_before_refresh = (unsigned)jregExpires / 2;
 
     pj_status_t status = pjsua_acc_add(&acc_cfg, PJ_TRUE, &g_acc_id);
 
@@ -476,6 +483,46 @@ Java_com_redyrect_pjsip_PjsipNative_statusText(JNIEnv *env, jclass cls, jint sta
 
 /* Send a fresh REGISTER: the transport may have died while the phone slept,
  * leaving the PBX a contact that no longer reaches us. */
+/* Offer exactly the PBX's codecs, in its order, and nothing else — as iOS
+ * does. A PJSIP codec id is name/rate[/channels]; a listed name enables
+ * every rate of it. */
+JNIEXPORT void JNICALL
+Java_com_redyrect_pjsip_PjsipNative_setCodecs(JNIEnv *env, jclass cls, jobjectArray jnames) {
+    pjsua_codec_info codecs[64];
+    unsigned count = PJ_ARRAY_SIZE(codecs);
+    if (pjsua_enum_codecs(codecs, &count) != PJ_SUCCESS) {
+        LOGE("pjsua_enum_codecs failed — codecs left as they were");
+        return;
+    }
+    jsize wanted = (*env)->GetArrayLength(env, jnames);
+    char offered[512] = "";
+    for (unsigned i = 0; i < count; i++) {
+        const pj_str_t *id = &codecs[i].codec_id;
+        int name_len = 0;
+        while (name_len < id->slen && id->ptr[name_len] != '/') name_len++;
+        pj_uint8_t priority = 0;
+        for (jsize w = 0; w < wanted; w++) {
+            jstring jname = (jstring)(*env)->GetObjectArrayElement(env, jnames, w);
+            const char *name = (*env)->GetStringUTFChars(env, jname, NULL);
+            int match = (int)strlen(name) == name_len && strncasecmp(name, id->ptr, name_len) == 0;
+            (*env)->ReleaseStringUTFChars(env, jname, name);
+            (*env)->DeleteLocalRef(env, jname);
+            if (match) {
+                int p = 250 - (int)w * 10;
+                priority = (pj_uint8_t)(p < 1 ? 1 : p);
+                break;
+            }
+        }
+        pjsua_codec_set_priority(id, priority);
+        if (priority > 0) {
+            size_t used = strlen(offered);
+            snprintf(offered + used, sizeof(offered) - used, "%s%.*s=%u",
+                     used ? ", " : "", (int)id->slen, id->ptr, priority);
+        }
+    }
+    LOGI("codecs offered: %s", offered);
+}
+
 JNIEXPORT jint JNICALL
 Java_com_redyrect_pjsip_PjsipNative_renewRegistration(JNIEnv *env, jclass cls) {
     if (g_acc_id == PJSUA_INVALID_ID) return -PJ_EINVALIDOP;

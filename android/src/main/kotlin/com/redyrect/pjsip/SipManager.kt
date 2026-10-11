@@ -23,7 +23,12 @@ data class SipConfig(
     val transport: String,
     val proxy: String? = null,
     /** 'disabled'|'optional'|'mandatory'. null leaves pjsua's default. */
-    val srtpPolicy: String? = null
+    val srtpPolicy: String? = null,
+    /** How the engine runs, from the PBX (/me/sip-config). */
+    val registerExpiresSec: Int,
+    val keepAliveSec: Int,
+    /** Encoding names in preference order (OPUS, G722, PCMU …). */
+    val codecs: List<String>,
 )
 
 /**
@@ -119,6 +124,36 @@ class SipManager(private val context: Context) {
     private val pjThread = HandlerThread("pjsip-worker").also { it.start() }
     private val pjHandler = Handler(pjThread.looper)
 
+    /**
+     * Re-REGISTER when the phone changes network (Wi-Fi ↔ cellular), as iOS
+     * does: the SBC's stored contact is the old network's address, so the
+     * next INVITE would have nowhere to land. The first report after start
+     * is the network we registered on; at most one renewal a second.
+     */
+    private var lastNetwork: android.net.Network? = null
+    private var lastRenewAt = 0L
+    private val networkCallback = object : android.net.ConnectivityManager.NetworkCallback() {
+        override fun onAvailable(network: android.net.Network) {
+            val previous = lastNetwork
+            lastNetwork = network
+            if (previous == null || previous == network || !pjsuaStarted) return
+            val now = android.os.SystemClock.elapsedRealtime()
+            if (now - lastRenewAt < 1_000) return
+            lastRenewAt = now
+            pjsipLog("[SipManager] network changed — re-registering")
+            renewRegistration()
+        }
+    }
+
+    init {
+        val connectivity = context.getSystemService(android.net.ConnectivityManager::class.java)
+        try {
+            connectivity?.registerDefaultNetworkCallback(networkCallback)
+        } catch (e: Exception) {
+            pjsipLog("[SipManager] cannot watch network changes — a network switch will miss calls until the next refresh: ${e.message}")
+        }
+    }
+
     /** JNI callback — invoked from native PJSIP threads */
     private val nativeCallback = object : PjsipNative.Callback {
         override fun onRegState(state: String, reason: String?) {
@@ -204,9 +239,13 @@ class SipManager(private val context: Context) {
                     if (it.isNotEmpty()) it else null
                 }
 
+                // Exactly the PBX's codecs, in its order (global to pjsua,
+                // so on every register).
+                PjsipNative.setCodecs(config.codecs.toTypedArray())
                 val status = PjsipNative.addAccount(sipUri, regUri, "*",
                     config.username, config.password, proxy,
-                    srtpPolicyToPjsip(config.srtpPolicy))
+                    srtpPolicyToPjsip(config.srtpPolicy),
+                    config.registerExpiresSec, config.keepAliveSec)
                 if (status != 0) throw Exception("account add failed: $status")
 
                 mainHandler.post { callback(null) }

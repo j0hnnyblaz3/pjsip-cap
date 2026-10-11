@@ -45,6 +45,14 @@ public class PjsipPlugin: CAPPlugin, CAPBridgedPlugin {
             call.reject("Missing required fields: server, username, password, domain")
             return
         }
+        // How the engine runs comes from the PBX (/me/sip-config); there is
+        // no local default to fall back on.
+        guard let registerExpires = call.getInt("registerExpiresSec"),
+              let keepAlive = call.getInt("keepAliveSec"),
+              let codecs = call.getArray("codecs", String.self), !codecs.isEmpty else {
+            call.reject("Missing engine settings: registerExpiresSec, keepAliveSec, codecs (from the PBX's /me/sip-config)")
+            return
+        }
 
         let config = SipConfig(
             server: server,
@@ -58,7 +66,10 @@ public class PjsipPlugin: CAPPlugin, CAPBridgedPlugin {
             // leaves pjsua's default. FreeSWITCH behind dSIPRouter takes a
             // clean RTP/SAVP offer ("mandatory") and rejects the OPTIONAL
             // hybrid — set it there, not here.
-            srtpPolicy: call.getString("srtpPolicy")
+            srtpPolicy: call.getString("srtpPolicy"),
+            registerExpiresSec: registerExpires,
+            keepAliveSec: keepAlive,
+            codecs: codecs
         )
 
         calls.register(config: config) { error in

@@ -30,6 +30,9 @@ internal class SipCredentialStore(context: Context) {
             .put("transport", config.transport)
             .put("proxy", config.proxy ?: JSONObject.NULL)
             .put("srtpPolicy", config.srtpPolicy ?: JSONObject.NULL)
+            .put("registerExpiresSec", config.registerExpiresSec)
+            .put("keepAliveSec", config.keepAliveSec)
+            .put("codecs", org.json.JSONArray(config.codecs))
             .toString()
         val cipher = Cipher.getInstance(TRANSFORMATION)
         cipher.init(Cipher.ENCRYPT_MODE, key())
@@ -54,6 +57,9 @@ internal class SipCredentialStore(context: Context) {
                 transport = json.getString("transport"),
                 proxy = json.optString("proxy").takeUnless { json.isNull("proxy") },
                 srtpPolicy = json.optString("srtpPolicy").takeUnless { json.isNull("srtpPolicy") },
+                registerExpiresSec = json.getInt("registerExpiresSec"),
+                keepAliveSec = json.getInt("keepAliveSec"),
+                codecs = json.getJSONArray("codecs").let { a -> List(a.length()) { a.getString(it) } },
             )
         } catch (e: Exception) {
             pjsipLog("[SipCredentialStore] saved login unreadable, discarding: ${e.message}")

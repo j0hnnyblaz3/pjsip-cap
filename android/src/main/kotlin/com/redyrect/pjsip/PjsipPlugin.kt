@@ -99,6 +99,14 @@ class PjsipPlugin : Plugin() {
         val username = call.getString("username") ?: return call.reject("Missing username")
         val password = call.getString("password") ?: return call.reject("Missing password")
         val domain = call.getString("domain") ?: return call.reject("Missing domain")
+        // How the engine runs comes from the PBX (/me/sip-config); there is
+        // no local default to fall back on.
+        val registerExpires = call.getInt("registerExpiresSec")
+        val keepAlive = call.getInt("keepAliveSec")
+        val codecs = call.getArray("codecs")?.toList<String>()
+        if (registerExpires == null || keepAlive == null || codecs.isNullOrEmpty()) {
+            return call.reject("Missing engine settings: registerExpiresSec, keepAliveSec, codecs (from the PBX's /me/sip-config)")
+        }
 
         val config = SipConfig(
             server = server,
@@ -108,7 +116,10 @@ class PjsipPlugin : Plugin() {
             domain = domain,
             transport = call.getString("transport", "udp")!!,
             proxy = call.getString("proxy"),
-            srtpPolicy = call.getString("srtpPolicy")
+            srtpPolicy = call.getString("srtpPolicy"),
+            registerExpiresSec = registerExpires,
+            keepAliveSec = keepAlive,
+            codecs = codecs,
         )
 
         CallController.register(config) { error ->

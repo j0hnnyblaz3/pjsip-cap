@@ -57,12 +57,12 @@ export class PjsipWeb extends WebPlugin implements PjsipPlugin {
       authorizationPassword: options.password,
       transportOptions: {
         server: wsServer,
-        // RFC 6223 CRLF keep-alive on the WSS every 30s. Required
-        // empirically through corporate NAT / proxies / some mobile
-        // carriers that close idle WebSocket connections within 60-90s.
-        // Without it the WSS dies silently while the user thinks they're
-        // still registered — next INVITE has nowhere to land.
-        keepAliveInterval: 30,
+        // RFC 6223 CRLF keep-alive on the WSS, at the PBX's interval
+        // (/me/sip-config, the same one iOS and Android use). Corporate
+        // NATs, proxies and some carriers close idle WebSockets within
+        // 60-90s; without it the WSS dies silently while the user thinks
+        // they're still registered.
+        keepAliveInterval: options.keepAliveSec,
       },
       // Cap the ICE-gathering wait. sip.js defaults to 5000ms and many
       // browsers/networks never fire `icegatheringstatechange: complete`,
@@ -134,14 +134,9 @@ export class PjsipWeb extends WebPlugin implements PjsipPlugin {
     await this.ua.start();
 
     this.registerer = new Registerer(this.ua, {
-      // Lower than sip.js's default 600s so:
-      //   1. The SBC drops stale contacts faster after a real loss
-      //      (no ghost-contact "phone rings but no audio" window).
-      //   2. The auto-refresh cycle fires more often, giving us a
-      //      faster signal when something's actually broken upstream.
-      // 180s = 3-minute refresh window, well inside any reasonable
-      // NAT timeout.
-      expires: 180,
+      // The PBX's expiry (/me/sip-config), the same one iOS and Android
+      // use: short, so the SBC drops a vanished client's contact quickly.
+      expires: options.registerExpiresSec,
       // Refresh at 50% of expires instead of the default 99%. The
       // 99% default means a refresh attempt 6 seconds before expiry —
       // if it fails or the network blips, we lose registration with

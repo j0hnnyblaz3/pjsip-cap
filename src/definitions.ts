@@ -101,6 +101,21 @@ export interface SipAccountConfig {
    * 'mandatory' fails the call rather than falling back to plain RTP.
    */
   srtpPolicy?: SrtpPolicy;
+  /**
+   * How the engine runs, from the PBX (`/me/sip-config`) — no platform keeps
+   * numbers or codec lists of its own.
+   *
+   * Seconds between REGISTER refreshes.
+   */
+  registerExpiresSec: number;
+  /** Seconds between keep-alive pings on the registration connection. */
+  keepAliveSec: number;
+  /**
+   * Codecs to offer, in preference order, by encoding name (`OPUS`,
+   * `G722`, `PCMU` …, any case). Everything else is off; DTMF stays on.
+   * Native only — a browser negotiates its own WebRTC codecs.
+   */
+  codecs: string[];
 }
 
 // --- Events ---
