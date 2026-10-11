@@ -35,19 +35,6 @@
             android:name=".CallEndReceiver"
             android:exported="false" />
 
-        <!-- The call over the lock screen: who is calling and the call's
-             controls, nothing of the app. -->
-        <activity
-            android:name=".CallScreenActivity"
-            android:exported="false"
-            android:excludeFromRecents="true"
-            android:launchMode="singleTop"
-            android:showWhenLocked="true"
-            android:turnScreenOn="true"
-            android:screenOrientation="portrait"
-            android:taskAffinity="com.redyrect.pjsip.call"
-            android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen" />
-
         <activity
             android:name=".CallAnswerActivity"
             android:exported="false"

@@ -1,6 +1,8 @@
 package com.redyrect.pjsip
 
 import android.Manifest
+import android.os.Build
+import android.view.WindowManager
 import com.getcapacitor.JSArray
 import com.getcapacitor.JSObject
 import com.getcapacitor.PermissionState
@@ -45,7 +47,31 @@ class PjsipPlugin : Plugin() {
                 notifyListeners(event, toJs(data))
             }
         }
+        // While a call is up — ringing included — the app may show over the
+        // lock screen, so a call is answered and controlled without an
+        // unlock, as with CallKit. Over the lock screen the app's privacy
+        // gate covers everything but its call screens; when the last call
+        // ends the lock screen covers the app again.
+        CallController.onLiveChanged = { live -> activity?.runOnUiThread { showOverLockScreen(live) } }
     }
+
+    override fun handleOnDestroy() {
+        CallController.onLiveChanged = null
+        super.handleOnDestroy()
+    }
+
+    private fun showOverLockScreen(show: Boolean) {
+        val activity = activity ?: return
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            activity.setShowWhenLocked(show)
+            activity.setTurnScreenOn(show)
+        } else {
+            @Suppress("DEPRECATION")
+            val flags = WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
+            if (show) activity.window.addFlags(flags) else activity.window.clearFlags(flags)
+        }
+    }
+
 
     // Permissions: the microphone, the one this plugin owns. Same contract as
     // iOS — `requestPermissions({ microphone })` resolves with

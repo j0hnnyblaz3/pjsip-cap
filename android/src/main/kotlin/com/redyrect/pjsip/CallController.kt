@@ -54,28 +54,27 @@ object CallController {
     /** Every call event the app gets — see `CallLedger`. Main thread. */
     private val ledger = CallLedger { snapshot ->
         events?.emit("callUpdated", snapshot)
-        val callId = snapshot["callId"] as? String
-        observers.filter { it.first == callId }.forEach { it.second(snapshot) }
-    }
-    /** The native call screen's subscriptions, by call id. Main thread. */
-    private val observers = mutableListOf<Pair<String, (Map<String, Any?>) -> Unit>>()
-
-    /** Follow [callId]'s snapshots (the same ones the app gets). Returns the
-     *  unsubscribe. Main thread. */
-    fun observe(callId: String, observer: (Map<String, Any?>) -> Unit): () -> Unit {
-        val entry = callId to observer
-        observers.add(entry)
-        return { observers.remove(entry) }
+        refreshLive()
     }
 
-    /** The call as it stands, or null when it is not (or no longer) up. */
-    fun snapshot(callId: String): Map<String, Any?>? = ledger.active().find { it["callId"] == callId }
+    /** Told whether any call is up — ringing included — each time that
+     *  changes. The plugin lets the app show over the lock screen only then.
+     *  Main thread. */
+    var onLiveChanged: ((Boolean) -> Unit)? = null
+        set(value) {
+            field = value
+            value?.invoke(live)
+        }
+    private var live = false
 
-    /** Who a pushed call is from, before its INVITE has named it. */
-    fun pushedName(callId: String): String? = pushedNames[callId]
+    val hasLiveCalls: Boolean get() = live
 
-    /** Whether [callId] is still up, ringing for its INVITE included. */
-    fun isLive(callId: String): Boolean = ledger.has(callId) || callId in reported
+    private fun refreshLive() {
+        val now = reported.isNotEmpty() || connections.isNotEmpty() || ledger.active().isNotEmpty()
+        if (now == live) return
+        live = now
+        onLiveChanged?.invoke(now)
+    }
 
     private fun onMain(block: () -> Unit) {
         if (Looper.myLooper() == Looper.getMainLooper()) block() else main.post(block)
@@ -250,6 +249,7 @@ object CallController {
 
     fun attach(callId: String, connection: CallConnectionService.SipConnection) {
         connections[callId] = connection
+        refreshLive()
     }
 
     /** Telecom wants the incoming-call screen shown for [callId]. */
@@ -276,6 +276,7 @@ object CallController {
             connection.destroy()
         }
         stopServiceIfIdle()
+        refreshLive()
     }
 
     // SIP engine events
@@ -322,6 +323,7 @@ object CallController {
 
     private fun reportIncoming(callId: String, remoteUri: String, callerName: String?) {
         reported.add(callId)
+        refreshLive()
         reportToTelecom(callId) { telecom, handle ->
             telecom.addNewIncomingCall(handle, Bundle().apply {
                 putString("callId", callId)

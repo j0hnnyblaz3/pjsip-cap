@@ -18,10 +18,11 @@ import androidx.core.app.Person
 /**
  * The call's notifications. A self-managed Telecom call gets no system UI,
  * so the plugin draws it: a ringing call-style notification (Answer /
- * Decline; full screen on a locked phone, as [CallScreenActivity]), then,
- * from [CallService], the ongoing call (Hang up). Tapping either opens the
- * call screen on a locked phone and the app on an unlocked one — the app
- * holds patient data. Every button goes to [CallController].
+ * Decline; full screen on a locked phone), then, from [CallService], the
+ * ongoing call (Hang up). Tapping either opens the app's call screen, over
+ * the lock screen on a locked phone — where the app shows nothing else
+ * (PjsipPlugin, the app's lock-screen rule). Every button goes to
+ * [CallController].
  */
 internal object CallNotifications {
     private const val CHANNEL_ID = "pjsip_incoming_calls"
@@ -42,12 +43,13 @@ internal object CallNotifications {
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
-        // The call screen: over the lock screen when locked (Android opens it
-        // full screen then), the app when not.
+        // The app's call screen. While a call is up the app may show over the
+        // lock screen (PjsipPlugin), showing only its call screens there;
+        // Android opens this full screen on a locked phone.
         val callScreen = PendingIntent.getActivity(
             context,
             requestCode(callId, 3),
-            CallScreenActivity.intent(context, callId),
+            launchIntent(context),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
         val caller = Person.Builder().setName(callerName).setImportant(true).build()
@@ -79,7 +81,7 @@ internal object CallNotifications {
         val callScreen = PendingIntent.getActivity(
             context,
             requestCode(callId, 5),
-            CallScreenActivity.intent(context, callId),
+            launchIntent(context),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
         val caller = Person.Builder().setName(callerName).setImportant(true).build()
@@ -158,8 +160,8 @@ class CallEndReceiver : BroadcastReceiver() {
 }
 
 /** Answer from the notification. It shows over the lock screen, so answering
- *  needs no unlock; then the call screen — over the lock screen on a locked
- *  phone, the app on an unlocked one. An activity, not a broadcast, because
+ *  needs no unlock; then the app's call screen, which may show over the lock
+ *  screen while the call is up. An activity, not a broadcast, because
  *  [CallService] can only start while something of the app is on screen. */
 class CallAnswerActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -169,9 +171,7 @@ class CallAnswerActivity : Activity() {
                 if (error != null) pjsipLog("[CallAnswerActivity] answer $callId failed: ${error.message}")
             }
         }
-        intent.getStringExtra(CallNotifications.EXTRA_CALL_ID)?.let { callId ->
-            startActivity(CallScreenActivity.intent(this, callId))
-        }
+        startActivity(CallNotifications.launchIntent(this))
         finish()
     }
 }
