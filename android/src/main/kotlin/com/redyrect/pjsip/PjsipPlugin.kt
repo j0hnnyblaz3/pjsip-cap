@@ -229,6 +229,12 @@ class PjsipPlugin : Plugin() {
         call.resolve()
     }
 
+    /** The pushes CallController.onPushMessage handles beyond the wake. */
+    @PluginMethod
+    fun getPushFeatures(call: PluginCall) {
+        call.resolve(JSObject().apply { put("features", JSArray(listOf("call_ended"))) })
+    }
+
     @PluginMethod
     fun getActiveCalls(call: PluginCall) {
         val arr = JSArray()

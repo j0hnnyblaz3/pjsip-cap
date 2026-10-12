@@ -3,6 +3,7 @@ package com.redyrect.pjsip
 import android.content.ComponentName
 import android.content.Context
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -122,11 +123,35 @@ object CallController {
      *  `domain::reach::IncomingCall` payload). Returns false for anything
      *  else, so the host can pass it on. Any thread. */
     fun onPushMessage(context: Context, data: Map<String, String>): Boolean {
+        // The call stopped ringing elsewhere (answered on another device,
+        // declined, or nobody answered). Checked first: it carries call_uuid.
+        if (data["type"] == "call_ended") {
+            val ended = data["call_uuid"]?.takeIf { it.isNotBlank() } ?: return true
+            main.post { onRingEnded(ended, data["reason"]) }
+            return true
+        }
         val callUuid = data["call_uuid"]?.takeIf { it.isNotBlank() } ?: return false
         val number = data["caller_id_number"].orEmpty()
         val name = data["caller_id_name"]?.takeIf { it.isNotBlank() }
         main.post { onIncomingPush(context, callUuid, number, name) }
         return true
+    }
+
+    /** Stop a call still ringing here whose ringing ended elsewhere — its
+     *  INVITE may never come, so no SIP CANCEL would stop it. A call this
+     *  phone already answered is left alone. */
+    private fun onRingEnded(callUuid: String, reason: String?) {
+        val connection = connections[callUuid]
+        val ringingHere = callUuid in awaitingInvite ||
+            (connection != null && connection.state == Connection.STATE_RINGING)
+        if (!ringingHere) return
+        pjsipLog("[CallController] push: $callUuid stopped ringing (${reason ?: "?"}) — ending it here")
+        val cause = if (reason == "answered" && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            DisconnectCause.ANSWERED_ELSEWHERE
+        } else {
+            DisconnectCause.MISSED
+        }
+        closeConnection(callUuid, cause)
     }
 
     /** Telecom rings now; SIP re-registers so the INVITE that follows reaches us. */
@@ -169,9 +194,16 @@ object CallController {
         }
         appContext?.let { CallService.start(it, callId, displayName ?: uri) }
         reportToTelecom(callId) { telecom, handle ->
+            // Telecom hands the connection service only EXTRA_OUTGOING_CALL_EXTRAS;
+            // a top-level callId never arrived, so the connection was filed
+            // under "unknown" and this call could never be set active or
+            // ended — it stayed DIALING, with the call service holding the
+            // microphone, until the app was killed.
             telecom.placeCall(telecomAddress(uri), Bundle().apply {
-                putString("callId", callId)
                 putParcelable(TelecomManager.EXTRA_PHONE_ACCOUNT_HANDLE, handle)
+                putBundle(TelecomManager.EXTRA_OUTGOING_CALL_EXTRAS, Bundle().apply {
+                    putString("callId", callId)
+                })
             })
         }
         return callId

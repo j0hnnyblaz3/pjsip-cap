@@ -19,11 +19,17 @@ class CallConnectionService : ConnectionService() {
         request: ConnectionRequest?
     ): Connection {
         val extras = request?.extras ?: Bundle()
-        val callId = extras.getString("callId") ?: "unknown"
-        val remoteUri = extras.getString("remoteUri") ?: "unknown"
+        val callId = extras.getString("callId") ?: return unidentified("incoming")
+        val remoteUri = extras.getString("remoteUri")?.takeIf { it.isNotBlank() }
 
         return SipConnection(callId).apply {
-            setAddress(CallController.telecomAddress(remoteUri), TelecomManager.PRESENTATION_ALLOWED)
+            // A pushed call whose push carried no number has no address yet:
+            // say so, rather than show the word "unknown" as the caller.
+            if (remoteUri != null) {
+                setAddress(CallController.telecomAddress(remoteUri), TelecomManager.PRESENTATION_ALLOWED)
+            } else {
+                setAddress(null, TelecomManager.PRESENTATION_UNKNOWN)
+            }
             extras.getString("callerName")?.let { setCallerDisplayName(it, TelecomManager.PRESENTATION_ALLOWED) }
             setRinging()
             connectionCapabilities = CallController.connectionCapabilities
@@ -39,7 +45,7 @@ class CallConnectionService : ConnectionService() {
         request: ConnectionRequest?
     ): Connection {
         val extras = request?.extras ?: Bundle()
-        val callId = extras.getString("callId") ?: "unknown"
+        val callId = extras.getString("callId") ?: return unidentified("outgoing")
 
         return SipConnection(callId).apply {
             setAddress(request?.address, TelecomManager.PRESENTATION_ALLOWED)
@@ -47,6 +53,15 @@ class CallConnectionService : ConnectionService() {
             connectionCapabilities = CallController.connectionCapabilities
             CallController.attach(callId, this)
         }
+    }
+
+    /** A connection request without our call id has no SIP call behind it:
+     *  refuse it rather than create one nothing can ever end. */
+    private fun unidentified(direction: String): Connection {
+        pjsipLog("[CallConnectionService] $direction connection without a callId — refused")
+        return Connection.createFailedConnection(
+            DisconnectCause(DisconnectCause.ERROR, "call id missing"),
+        )
     }
 
     /** One SIP call as Telecom sees it; its callbacks go to the controller. */

@@ -385,6 +385,12 @@ export class PjsipWeb extends WebPlugin implements PjsipPlugin {
     });
   }
 
+  async getPushFeatures(): Promise<{ features: string[] }> {
+    // A browser's pushes go to the app's service worker, not this plugin;
+    // the app asks the worker what it handles.
+    return { features: [] };
+  }
+
   async unregisterPush(): Promise<void> {
     // No-op on web
   }

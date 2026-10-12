@@ -246,6 +246,13 @@ export interface PjsipPlugin {
   }): Promise<SipPermissionStatus>;
 
   registerPush(): Promise<void>;
+  /**
+   * The pushes this build handles beyond the incoming-call wake, to declare
+   * when its token is registered with the PBX — e.g. `call_ended` (stop a
+   * call still ringing here). A push a build doesn't list is never sent to
+   * it: builds from before `call_ended` read any call push as a new call.
+   */
+  getPushFeatures(): Promise<{ features: string[] }>;
   unregisterPush(): Promise<void>;
 
   // Events

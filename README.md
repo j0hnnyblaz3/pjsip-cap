@@ -42,6 +42,7 @@ npx cap sync
 * [`checkPermissions()`](#checkpermissions)
 * [`requestPermissions(...)`](#requestpermissions)
 * [`registerPush()`](#registerpush)
+* [`getPushFeatures()`](#getpushfeatures)
 * [`unregisterPush()`](#unregisterpush)
 * [`addListener('callUpdated', ...)`](#addlistenercallupdated-)
 * [`addListener('registrationStateChanged', ...)`](#addlistenerregistrationstatechanged-)
@@ -268,6 +269,22 @@ Prompt for microphone permission.
 ```typescript
 registerPush() => Promise<void>
 ```
+
+--------------------
+
+
+### getPushFeatures()
+
+```typescript
+getPushFeatures() => Promise<{ features: string[]; }>
+```
+
+The pushes this build handles beyond the incoming-call wake, to declare
+when its token is registered with the PBX — e.g. `call_ended` (stop a
+call still ringing here). A push a build doesn't list is never sent to
+it: builds from before `call_ended` read any call push as a new call.
+
+**Returns:** <code>Promise&lt;{ features: string[]; }&gt;</code>
 
 --------------------
 

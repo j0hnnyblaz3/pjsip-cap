@@ -14,6 +14,7 @@ public class PjsipPlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "answerCall", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "hangupCall", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "getActiveCalls", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "getPushFeatures", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "holdCall", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "muteCall", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "sendDtmf", returnType: CAPPluginReturnPromise),
@@ -164,6 +165,12 @@ public class PjsipPlugin: CAPPlugin, CAPBridgedPlugin {
         calls.end(callId: callId) {
             call.resolve()
         }
+    }
+
+    /// None beyond the wake: a PushKit push must report a call to CallKit,
+    /// so it can't stop one — the SIP CANCEL does, once registered.
+    @objc func getPushFeatures(_ call: CAPPluginCall) {
+        call.resolve(["features": [String]()])
     }
 
     @objc func getActiveCalls(_ call: CAPPluginCall) {
