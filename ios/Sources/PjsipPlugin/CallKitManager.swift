@@ -460,6 +460,40 @@ extension CallKitManager: CXProviderDelegate {
     /// Setting the category here (before action.fulfill) is fine
     /// and is actually required — CallKit only handles activation,
     /// not category selection.
+    /// Speaker / earpiece / Bluetooth: an override on the audio session this
+    /// class configures for the call — the owner of call audio on iOS, as
+    /// Telecom is on Android.
+    func setAudioRoute(route: String) {
+        let session = AVAudioSession.sharedInstance()
+        do {
+            // Don't re-set the category here. CallKit (via
+            // CallKitManager.configureAudioSession) already chose
+            // (.playAndRecord, .voiceChat) with [.allowBluetooth,
+            // .allowBluetoothA2DP, .duckOthers]. If we re-set without
+            // carrying the same options, the speaker toggle strips
+            // Bluetooth support mid-call — user taps Speaker and their
+            // AirPods get dropped. The route override below is what
+            // actually switches the speaker/earpiece/BT path; it
+            // doesn't need a category change first.
+            switch route {
+            case "speaker":
+                try session.overrideOutputAudioPort(.speaker)
+            case "earpiece":
+                try session.overrideOutputAudioPort(.none)
+            case "bluetooth":
+                let bluetoothRoutes: [AVAudioSession.Port] = [.bluetoothHFP, .bluetoothA2DP, .bluetoothLE]
+                if let availableInputs = session.availableInputs,
+                   let btInput = availableInputs.first(where: { bluetoothRoutes.contains($0.portType) }) {
+                    try session.setPreferredInput(btInput)
+                }
+            default:
+                break
+            }
+        } catch {
+            pjsipLog("[CallKitManager] Audio route error: \(error)")
+        }
+    }
+
     private func configureAudioSession() {
         let session = AVAudioSession.sharedInstance()
         do {

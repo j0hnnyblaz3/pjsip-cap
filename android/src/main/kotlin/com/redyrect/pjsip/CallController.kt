@@ -228,7 +228,31 @@ object CallController {
 
     fun sendDtmf(callId: String, digit: String) = sip().sendDtmf(callId, digit)
     fun transfer(callId: String, target: String) = sip().transferCall(callId, target)
-    fun setAudioRoute(route: String) = sip().setAudioRoute(route)
+    /** Speaker / earpiece / Bluetooth, through Telecom — it owns a call's
+     *  audio route, as iOS's audio session does; setting AudioManager
+     *  directly was overridden by Telecom's own route (it stayed on the
+     *  earpiece). */
+    fun setAudioRoute(route: String) = onMain {
+        val telecomRoute = when (route) {
+            "speaker" -> android.telecom.CallAudioState.ROUTE_SPEAKER
+            "earpiece" -> android.telecom.CallAudioState.ROUTE_WIRED_OR_EARPIECE
+            "bluetooth" -> android.telecom.CallAudioState.ROUTE_BLUETOOTH
+            else -> {
+                pjsipLog("[CallController] audio route '$route' is not one of speaker/earpiece/bluetooth — ignored")
+                return@onMain
+            }
+        }
+        val connection = connections.values.firstOrNull {
+            it.state == Connection.STATE_ACTIVE || it.state == Connection.STATE_HOLDING || it.state == Connection.STATE_DIALING
+        }
+        if (connection == null) {
+            pjsipLog("[CallController] audio route $route: no call in Telecom to route")
+            return@onMain
+        }
+        pjsipLog("[CallController] audio route → $route")
+        @Suppress("DEPRECATION") // requestCallEndpointChange (API 34) needs a CallEndpoint; this works on every level
+        connection.setAudioRoute(telecomRoute)
+    }
     /** Every live call, as the app's snapshots. Main thread, like the ledger. */
     fun activeCalls(): List<Map<String, Any?>> {
         if (Looper.myLooper() == Looper.getMainLooper()) return ledger.active()

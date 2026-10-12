@@ -385,25 +385,6 @@ class SipManager(private val context: Context) {
         pjHandler.post { PjsipNative.transferCall(pjCallId, target) }
     }
 
-    fun setAudioRoute(route: String) {
-        val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-        when (route) {
-            "speaker" -> {
-                audioManager.isSpeakerphoneOn = true
-                audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
-            }
-            "earpiece" -> {
-                audioManager.isSpeakerphoneOn = false
-                audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
-            }
-            "bluetooth" -> {
-                audioManager.startBluetoothSco()
-                audioManager.isBluetoothScoOn = true
-            }
-        }
-    }
-
-
     // Helpers
 
     private fun extractDisplayName(sipUri: String): String? {

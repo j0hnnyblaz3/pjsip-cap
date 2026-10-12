@@ -1040,37 +1040,6 @@ class SipManager: NSObject {
         }
     }
 
-    func setAudioRoute(route: String) {
-        let session = AVAudioSession.sharedInstance()
-        do {
-            // Don't re-set the category here. CallKit (via
-            // CallKitManager.configureAudioSession) already chose
-            // (.playAndRecord, .voiceChat) with [.allowBluetooth,
-            // .allowBluetoothA2DP, .duckOthers]. If we re-set without
-            // carrying the same options, the speaker toggle strips
-            // Bluetooth support mid-call — user taps Speaker and their
-            // AirPods get dropped. The route override below is what
-            // actually switches the speaker/earpiece/BT path; it
-            // doesn't need a category change first.
-            switch route {
-            case "speaker":
-                try session.overrideOutputAudioPort(.speaker)
-            case "earpiece":
-                try session.overrideOutputAudioPort(.none)
-            case "bluetooth":
-                let bluetoothRoutes: [AVAudioSession.Port] = [.bluetoothHFP, .bluetoothA2DP, .bluetoothLE]
-                if let availableInputs = session.availableInputs,
-                   let btInput = availableInputs.first(where: { bluetoothRoutes.contains($0.portType) }) {
-                    try session.setPreferredInput(btInput)
-                }
-            default:
-                break
-            }
-        } catch {
-            pjsipLog("[SipManager] Audio route error: \(error)")
-        }
-    }
-
     // MARK: - PJSIP Callback Handlers (called from PJSIP's internal thread)
 
     func handleRegistrationStateChange(accountId: pjsua_acc_id, info: pjsua_reg_info) {

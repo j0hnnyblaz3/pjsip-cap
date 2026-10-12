@@ -113,7 +113,7 @@ final class CallController: NSObject {
 
     func sendDtmf(callId: String, digit: String) { sip.sendDtmf(callId: callId, digit: digit) }
     func transfer(callId: String, target: String) { sip.transferCall(callId: callId, target: target) }
-    func setAudioRoute(_ route: String) { sip.setAudioRoute(route: route) }
+    func setAudioRoute(_ route: String) { callKit.setAudioRoute(route: route) }
     /// Every live call, as the app's snapshots — from the ledger, so it never
     /// touches pjsua (whose thread checks aborted the app when this ran on
     /// the bridge thread).
