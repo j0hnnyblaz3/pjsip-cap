@@ -133,8 +133,31 @@ object CallController {
         val callUuid = data["call_uuid"]?.takeIf { it.isNotBlank() } ?: return false
         val number = data["caller_id_number"].orEmpty()
         val name = data["caller_id_name"]?.takeIf { it.isNotBlank() }
-        main.post { onIncomingPush(context, callUuid, number, name) }
+        val waitMs = ringWaitMs(callUuid, data["ring_until"])
+        main.post { onIncomingPush(context, callUuid, number, name, waitMs) }
         return true
+    }
+
+    /** How long a pushed call may wait for its INVITE: until the PBX's ring
+     *  deadline (`ring_until`), after which the call has gone to voicemail or
+     *  ended and no CANCEL will reach a phone that never got the INVITE. */
+    private fun ringWaitMs(callUuid: String, ringUntil: String?): Long {
+        // The PBX's exact format: UTC, milliseconds ("…T13:23:19.123Z").
+        // SimpleDateFormat, not java.time: the app supports Android 7.
+        val until = ringUntil?.let {
+            try {
+                java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", java.util.Locale.US)
+                    .apply { timeZone = java.util.TimeZone.getTimeZone("UTC") }
+                    .parse(it)?.time
+            } catch (e: Exception) {
+                null
+            }
+        }
+        if (until == null) {
+            pjsipLog("[CallController] push $callUuid has no ring_until (PBX before it) — waiting ${SipManager.EXPECT_INVITE_MS / 1000}s")
+            return SipManager.EXPECT_INVITE_MS
+        }
+        return (until - System.currentTimeMillis()).coerceAtLeast(0)
     }
 
     /** Stop a call still ringing here whose ringing ended elsewhere — its
@@ -155,10 +178,10 @@ object CallController {
     }
 
     /** Telecom rings now; SIP re-registers so the INVITE that follows reaches us. */
-    private fun onIncomingPush(context: Context, callUuid: String, number: String, name: String?) {
-        pjsipLog("[CallController] incoming push $callUuid from ${name ?: number}")
+    private fun onIncomingPush(context: Context, callUuid: String, number: String, name: String?, waitMs: Long) {
+        pjsipLog("[CallController] incoming push $callUuid from ${name ?: number} (rings up to ${waitMs / 1000}s)")
         val sip = start(context)
-        sip.expectIncomingCall(callUuid)
+        sip.expectIncomingCall(callUuid, waitMs)
         if (sip.isRegistered) {
             sip.renewRegistration()
         } else {
@@ -176,11 +199,11 @@ object CallController {
         reportIncoming(callUuid, number, name)
         val giveUp = Runnable {
             awaitingInvite.remove(callUuid)
-            pjsipLog("[CallController] push $callUuid: no INVITE within ${SipManager.EXPECT_INVITE_MS / 1000}s — ending")
+            pjsipLog("[CallController] push $callUuid: no INVITE by the ring deadline — ending")
             closeConnection(callUuid, DisconnectCause.MISSED)
         }
         awaitingInvite[callUuid] = giveUp
-        main.postDelayed(giveUp, SipManager.EXPECT_INVITE_MS)
+        main.postDelayed(giveUp, waitMs)
     }
 
     // Calls

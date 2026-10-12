@@ -337,13 +337,13 @@ class CallKitManager: NSObject {
         provider.reportOutgoingCall(with: uuid, connectedAt: nil)
     }
 
-    func reportCallEnded(callId: String) {
+    func reportCallEnded(callId: String, reason: CXCallEndedReason = .remoteEnded) {
         guard Thread.isMainThread else {
-            DispatchQueue.main.async { self.reportCallEnded(callId: callId) }
+            DispatchQueue.main.async { self.reportCallEnded(callId: callId, reason: reason) }
             return
         }
         guard let uuid = reverseCallMap[callId] else { return }
-        provider.reportCall(with: uuid, endedAt: nil, reason: .remoteEnded)
+        provider.reportCall(with: uuid, endedAt: nil, reason: reason)
         callMap.removeValue(forKey: uuid)
         reverseCallMap.removeValue(forKey: callId)
         outboundCallIds.remove(callId)

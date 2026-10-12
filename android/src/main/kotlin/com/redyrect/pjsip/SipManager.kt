@@ -38,7 +38,8 @@ data class SipConfig(
 class SipManager(private val context: Context) {
 
     companion object {
-        /** How long a push's call id is expected before its INVITE is presumed lost. */
+        /** How long a push's call id is expected before its INVITE is presumed
+         *  lost, when the push carries no ring deadline (a PBX before it). */
         const val EXPECT_INVITE_MS = 30_000L
         /** How long an answer waits for an INVITE still in flight. */
         const val ANSWER_WAIT_MS = 10_000L
@@ -304,9 +305,9 @@ class SipManager(private val context: Context) {
     }
 
     /** A push announced call [callUuid]; its INVITE should follow. Main thread. */
-    fun expectIncomingCall(callUuid: String) {
+    fun expectIncomingCall(callUuid: String, waitMs: Long) {
         expected.add(callUuid)
-        mainHandler.postDelayed({ expected.remove(callUuid) }, EXPECT_INVITE_MS)
+        mainHandler.postDelayed({ expected.remove(callUuid) }, waitMs)
     }
 
     /** Re-REGISTER now: after the phone slept the PBX's contact for us may be dead. */

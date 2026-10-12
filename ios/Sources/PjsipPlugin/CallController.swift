@@ -29,6 +29,8 @@ final class CallController: NSObject {
     }
     /// The caller name each VoIP push carried, for an INVITE without one.
     private var pushedNames: [String: String] = [:]
+    /// The SIP login a push registers with when the app was killed.
+    private let credentials = SipCredentialStore()
 
     override init() {
         sip = SipManager.shared
@@ -47,11 +49,17 @@ final class CallController: NSObject {
 
     var registrationState: String { sip.registrationState }
 
+    /// Register, keeping the login so a push can register while the app's
+    /// web layer isn't running (as on Android).
     func register(config: SipConfig, completion: @escaping (Error?) -> Void) {
-        sip.register(config: config, completion: completion)
+        sip.register(config: config) { [weak self] error in
+            if error == nil { self?.credentials.save(config) }
+            completion(error)
+        }
     }
 
     func unregister(completion: @escaping (Error?) -> Void) {
+        credentials.clear()
         push.unregister()
         sip.unregister(completion: completion)
     }
@@ -185,16 +193,42 @@ extension CallController: PushManagerDelegate {
         // when the INVITE arrives with the bridged callId.
         //   1. Tell SIP which call_uuid to expect, so the INVITE carrying
         //      X-Redyrect-Call-UUID binds to it.
-        //   2. Re-REGISTER: iOS closed the TLS socket while the app was
-        //      suspended, so the PBX's contact is stale and the INVITE would
-        //      have nowhere to go.
+        //   2. Register now: renew a suspended app's registration (iOS
+        //      closed its TLS socket, so the PBX's contact is stale), or
+        //      register a killed app from the saved login.
+        //   3. End the ringing at the PBX's ring deadline if the INVITE never
+        //      comes — CallKit has no timeout of its own, and a phone that
+        //      never got the INVITE gets no CANCEL.
         if let uuid = payload["call_uuid"] as? String {
             if let name = payload["caller_id_name"] as? String, !name.isEmpty {
                 pushedNames[uuid] = name
             }
             sip.expectIncomingCall(callUuid: uuid)
+            endAtRingDeadline(callUuid: uuid, ringUntil: payload["ring_until"] as? String)
         }
-        sip.forceRegister()
+        sip.registerForPush(saved: credentials.load())
+    }
+
+    /// At the PBX's ring deadline (`ring_until`: UTC, milliseconds), end a
+    /// pushed call still waiting for its INVITE, as unanswered.
+    private func endAtRingDeadline(callUuid: String, ringUntil: String?) {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let deadline: Date
+        if let ringUntil = ringUntil, let parsed = formatter.date(from: ringUntil) {
+            deadline = parsed
+        } else {
+            pjsipLog("[CallController] push \(callUuid) has no ring_until (PBX before it) — ending after 30s without an INVITE")
+            deadline = Date().addingTimeInterval(30)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + max(0, deadline.timeIntervalSinceNow)) { [weak self] in
+            self?.sip.abandonIfAwaitingInvite(callUuid: callUuid) { abandoned in
+                guard abandoned, let self = self else { return }
+                pjsipLog("[CallController] push \(callUuid): no INVITE by the ring deadline — ending")
+                self.pushedNames.removeValue(forKey: callUuid)
+                self.callKit.reportCallEnded(callId: callUuid, reason: .unanswered)
+            }
+        }
     }
 
     func pushManagerDidUpdatePushToken(token: String, environment: String) {

@@ -25,7 +25,7 @@ private let pjsipFilteredLogWriter: @convention(c) (Int32, UnsafePointer<CChar>?
     pjsipLog(trimmed)
 }
 
-struct SipConfig {
+struct SipConfig: Codable {
     let server: String
     let port: Int
     let username: String
@@ -421,12 +421,10 @@ class SipManager: NSObject {
     /// this UUID as the plugin callId so CallKit's call UUID is the
     /// same identifier across push → INVITE → answer.
     ///
-    /// No background timer here — if the user never taps Accept,
-    /// iOS's own PushKit/CallKit ring timeout (~30s, OS-controlled)
-    /// dismisses the incoming-call UI. The case we DO actively
-    /// time-bound is when the user *does* tap Accept and the INVITE
-    /// still hasn't arrived — see the 5s answer budget in
-    /// `answerCall` below.
+    /// CallKit has no ring timeout of its own: a pushed call whose INVITE
+    /// never comes rings until something ends it. CallController ends it at
+    /// the PBX's ring deadline (`abandonIfAwaitingInvite`); the answer budget
+    /// in `answerCall` covers a user who taps Accept before the INVITE.
     func expectIncomingCall(callUuid: String) {
         pjThread.performAsync { [weak self] in
             guard let self = self else { return }
@@ -485,6 +483,44 @@ class SipManager: NSObject {
     /// Fail the held CallKit answer completion for a UUID, if any,
     /// and clean up its bookkeeping. Used both by the 5s budget
     /// expiry and by hangup/unregister teardown.
+    /// Register now for a push: renew an existing account's registration, or
+    /// — when the push woke a killed app and there is no account yet —
+    /// register from the saved login, so the PBX's INVITE has somewhere to go.
+    func registerForPush(saved: SipConfig?) {
+        pjThread.performAsync { [weak self] in
+            guard let self = self else { return }
+            if self.accountId != -1 {
+                self.forceRegister()
+                return
+            }
+            guard let saved = saved else {
+                pjsipLog("[SipManager] push: no SIP account and no saved login — the call cannot reach this phone until the app signs in")
+                return
+            }
+            pjsipLog("[SipManager] push: no SIP account — registering from the saved login")
+            self.register(config: saved) { error in
+                if let error = error {
+                    pjsipLog("[SipManager] push: register from saved login failed: \(error.localizedDescription)")
+                }
+            }
+        }
+    }
+
+    /// The ring deadline passed for a pushed call: if its INVITE never came,
+    /// forget it (and fail a held Accept) and report true so CallKit's call
+    /// can be ended. False when the INVITE arrived — SIP ends that call.
+    func abandonIfAwaitingInvite(callUuid: String, completion: @escaping (Bool) -> Void) {
+        pjThread.performAsync { [weak self] in
+            guard let self = self, self.pendingCallUuids.contains(callUuid) else {
+                DispatchQueue.main.async { completion(false) }
+                return
+            }
+            self.removePendingCallUuid(callUuid)
+            self.failPendingAnswer(callUuid: callUuid, reason: "ring deadline passed with no INVITE")
+            DispatchQueue.main.async { completion(true) }
+        }
+    }
+
     private func failPendingAnswer(callUuid: String, reason: String) {
         cancelAnswerTimer(callUuid: callUuid)
         pendingAnswerCallUuids.remove(callUuid)
