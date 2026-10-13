@@ -106,6 +106,17 @@ internal class CallLedger(private val emit: (Map<String, Any?>) -> Unit) {
         finished.add(callId)
     }
 
+    /** A call that ended before it was ever opened — a push whose INVITE
+     *  never came. Nothing is sent (the app never saw it), and later reports
+     *  for it are dropped like any finished call's. */
+    fun endUnopened(callId: String) {
+        if (!calls.containsKey(callId)) finished.add(callId)
+    }
+
+    /** Whether the call is over here — a late or repeated push for it must
+     *  not ring again. */
+    fun isFinished(callId: String): Boolean = callId in finished
+
     fun has(callId: String): Boolean = calls.containsKey(callId)
     fun callerName(callId: String): String? = calls[callId]?.callerName
 

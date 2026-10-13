@@ -20,6 +20,16 @@ class CallConnectionService : ConnectionService() {
     ): Connection {
         val extras = request?.extras ?: Bundle()
         val callId = extras.getString("callId") ?: return unidentified("incoming")
+        // One connection per call. A second one for the same id would take
+        // the first one's place in the controller, leaving the first ringing
+        // in Telecom with nothing able to end it — the phone held in ringtone
+        // mode, and every later call silent.
+        if (CallController.hasConnection(callId)) {
+            pjsipLog("[CallConnectionService] incoming $callId already has a connection — refused")
+            return Connection.createFailedConnection(
+                DisconnectCause(DisconnectCause.CANCELED, "already ringing"),
+            )
+        }
         val remoteUri = extras.getString("remoteUri")?.takeIf { it.isNotBlank() }
 
         return SipConnection(callId).apply {
@@ -46,6 +56,12 @@ class CallConnectionService : ConnectionService() {
     ): Connection {
         val extras = request?.extras ?: Bundle()
         val callId = extras.getString("callId") ?: return unidentified("outgoing")
+        if (CallController.hasConnection(callId)) {
+            pjsipLog("[CallConnectionService] outgoing $callId already has a connection — refused")
+            return Connection.createFailedConnection(
+                DisconnectCause(DisconnectCause.CANCELED, "already placed"),
+            )
+        }
 
         return SipConnection(callId).apply {
             setAddress(request?.address, TelecomManager.PRESENTATION_ALLOWED)

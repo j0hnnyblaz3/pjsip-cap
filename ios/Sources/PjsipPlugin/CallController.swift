@@ -200,6 +200,14 @@ extension CallController: PushManagerDelegate {
         //      comes — CallKit has no timeout of its own, and a phone that
         //      never got the INVITE gets no CANCEL.
         if let uuid = payload["call_uuid"] as? String {
+            // A repeated or late push for a call already over here: iOS made
+            // us report it to CallKit, so end it at once rather than ring a
+            // call that is finished.
+            if ledger.isFinished(uuid) {
+                pjsipLog("[CallController] push \(uuid): that call is already over here — ending it")
+                callKit.reportCallEnded(callId: uuid, reason: .remoteEnded)
+                return
+            }
             if let name = payload["caller_id_name"] as? String, !name.isEmpty {
                 pushedNames[uuid] = name
             }
@@ -227,6 +235,7 @@ extension CallController: PushManagerDelegate {
                 pjsipLog("[CallController] push \(callUuid): no INVITE by the ring deadline — ending")
                 self.pushedNames.removeValue(forKey: callUuid)
                 self.callKit.reportCallEnded(callId: callUuid, reason: .unanswered)
+                self.ledger.endUnopened(callId: callUuid)
             }
         }
     }

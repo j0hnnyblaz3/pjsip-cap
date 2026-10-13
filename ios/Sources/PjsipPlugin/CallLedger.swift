@@ -111,6 +111,17 @@ final class CallLedger {
         finished.insert(callId)
     }
 
+    /// A call that ended before it was ever opened — a push whose INVITE
+    /// never came. Nothing is sent (the app never saw it), and later reports
+    /// for it are dropped like any finished call's.
+    func endUnopened(callId: String) {
+        if calls[callId] == nil { finished.insert(callId) }
+    }
+
+    /// Whether the call is over here — a late or repeated push for it must
+    /// not ring again.
+    func isFinished(_ callId: String) -> Bool { finished.contains(callId) }
+
     func has(_ callId: String) -> Bool { calls[callId] != nil }
 
     /// Every live call, for `getActiveCalls`.

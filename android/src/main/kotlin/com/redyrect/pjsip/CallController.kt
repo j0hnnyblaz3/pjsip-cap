@@ -134,6 +134,13 @@ object CallController {
         val number = data["caller_id_number"].orEmpty()
         val name = data["caller_id_name"]?.takeIf { it.isNotBlank() }
         val waitMs = ringWaitMs(callUuid, data["ring_until"])
+        if (waitMs == 0L) {
+            // FCM delivers late, and sometimes twice. Past the deadline the
+            // call has gone to voicemail or ended: ringing it now rings a
+            // call nothing will ever end.
+            pjsipLog("[CallController] push $callUuid arrived after its ring deadline — not ringing")
+            return true
+        }
         main.post { onIncomingPush(context, callUuid, number, name, waitMs) }
         return true
     }
@@ -179,6 +186,10 @@ object CallController {
 
     /** Telecom rings now; SIP re-registers so the INVITE that follows reaches us. */
     private fun onIncomingPush(context: Context, callUuid: String, number: String, name: String?, waitMs: Long) {
+        if (ledger.isFinished(callUuid)) {
+            pjsipLog("[CallController] push $callUuid: that call is already over here — not ringing")
+            return
+        }
         pjsipLog("[CallController] incoming push $callUuid from ${name ?: number} (rings up to ${waitMs / 1000}s)")
         val sip = start(context)
         sip.expectIncomingCall(callUuid, waitMs)
@@ -326,6 +337,9 @@ object CallController {
 
     // Telecom connections (CallConnectionService hands them here)
 
+    /** Whether Telecom already holds a connection for [callId]. Main thread. */
+    fun hasConnection(callId: String): Boolean = callId in connections
+
     fun attach(callId: String, connection: CallConnectionService.SipConnection) {
         connections[callId] = connection
         refreshLive()
@@ -354,6 +368,7 @@ object CallController {
             connection.setDisconnected(DisconnectCause(cause))
             connection.destroy()
         }
+        if (!ledger.has(callId)) ledger.endUnopened(callId)
         stopServiceIfIdle()
         refreshLive()
     }

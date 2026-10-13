@@ -675,8 +675,10 @@ export class PjsipWeb extends WebPlugin implements PjsipPlugin {
       if (audioReceiver?.track) {
         const audioEl = this.createAudioElement();
         audioEl.srcObject = new MediaStream([audioReceiver.track]);
-        audioEl.play().catch(() => {
-          // Autoplay may be blocked — user gesture required
+        audioEl.play().catch((e: unknown) => {
+          // The browser refused to play the other side: the call is up and
+          // silent. Say so — swallowing this once cost a day of guessing.
+          console.warn('[capacitor-pjsip] remote audio refused to play', e);
         });
       }
     } catch {
