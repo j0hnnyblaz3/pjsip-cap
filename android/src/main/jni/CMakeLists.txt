@@ -63,6 +63,10 @@ target_compile_definitions(pjsip_jni PRIVATE PJ_AUTOCONF=1)
 # Link with the C++ driver so libc++ (exceptions, operator new, std::terminate)
 # is pulled in for the C++ objects inside the static pjsip libs.
 set_target_properties(pjsip_jni PROPERTIES LINKER_LANGUAGE CXX)
+# 16 KB memory pages: newer Android devices use them, and Google Play refuses
+# a bundle whose native code targets Android 15+ but loads at 4 KB alignment.
+# Only this library is ours to align; libc++_shared ships aligned.
+target_link_options(pjsip_jni PRIVATE "-Wl,-z,max-page-size=16384")
 
 # Link everything together
 target_link_libraries(pjsip_jni
