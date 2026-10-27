@@ -283,6 +283,31 @@ class PjsipPlugin : Plugin() {
         call.resolve()
     }
 
+    /**
+     * Android 14+ revokes USE_FULL_SCREEN_INTENT by default for non-dialer
+     * apps, and a denied full-screen intent silently downgrades the incoming
+     * call to a heads-up banner that never wakes a black lock screen. The
+     * client checks this once and, when false, shows its one-tap explainer
+     * that opens the app's notification settings (Teams-style flow).
+     */
+    @PluginMethod
+    fun canUseFullScreenIntent(call: PluginCall) {
+        val nm = androidx.core.app.NotificationManagerCompat.from(context)
+        val granted = Build.VERSION.SDK_INT < 34 || nm.canUseFullScreenIntent()
+        call.resolve(JSObject().apply { put("granted", granted) })
+    }
+
+    /** Deep-link to this app's notification settings, where the
+     *  full-screen-intent toggle lives. */
+    @PluginMethod
+    fun openFullScreenIntentSettings(call: PluginCall) {
+        val intent = android.content.Intent(android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+            .putExtra(android.provider.Settings.EXTRA_APP_PACKAGE, context.packageName)
+            .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+        context.startActivity(intent)
+        call.resolve()
+    }
+
     // Push notifications
 
     @PluginMethod

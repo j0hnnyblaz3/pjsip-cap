@@ -314,6 +314,13 @@ Java_com_redyrect_pjsip_PjsipNative_init(JNIEnv *env, jclass cls, jobject callba
     pjsua_media_config media_cfg;
     pjsua_media_config_default(&media_cfg);
 
+    /* Echo: speaker calls on loud phone speakers sent the far end back to
+     * them (CIRCLES-8) — the default canceller (speex, 200 ms tail) cannot
+     * model the room. Use pjmedia's WebRTC AEC3 (compiled into this build,
+     * see echo_webrtc_aec3.o): it models the delay path itself, so the
+     * default 200 ms tail is enough. */
+    media_cfg.ec_options = PJMEDIA_ECHO_WEBRTC_AEC3;
+
     status = pjsua_init(&cfg, &log_cfg, &media_cfg);
     if (status != PJ_SUCCESS) {
         LOGE("pjsua_init failed: %d", status);

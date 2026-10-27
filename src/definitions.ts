@@ -226,6 +226,21 @@ export interface PjsipPlugin {
   transferCall(options: { callId: string; target: string }): Promise<void>;
   setAudioRoute(options: { route: AudioRoute }): Promise<void>;
 
+  // Full-screen incoming-call permission (Android 14+). See the method
+  // docs on the Android implementation.
+  /**
+   * Whether incoming calls may present full-screen over the lock screen.
+   * Android 14+ revokes this by default for non-dialer apps; when false,
+   * the incoming call degrades to a heads-up banner and never wakes the
+   * screen. Always true on iOS (CallKit owns the incoming-call UI) and web.
+   */
+  canUseFullScreenIntent(): Promise<{ granted: boolean }>;
+  /**
+   * Open the OS page where the user grants full-screen incoming calls
+   * (the app's notification settings on Android). No-op on iOS and web.
+   */
+  openFullScreenIntentSettings(): Promise<void>;
+
   // Push notifications
   /**
    * Update the caller name shown by the OS call UI (CallKit on iOS,

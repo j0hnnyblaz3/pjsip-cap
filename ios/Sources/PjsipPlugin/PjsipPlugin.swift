@@ -20,6 +20,8 @@ public class PjsipPlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "sendDtmf", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "transferCall", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "setAudioRoute", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "canUseFullScreenIntent", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "openFullScreenIntentSettings", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "registerPush", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "unregisterPush", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "checkPermissions", returnType: CAPPluginReturnPromise),
@@ -225,6 +227,17 @@ public class PjsipPlugin: CAPPlugin, CAPBridgedPlugin {
             return
         }
         calls.setAudioRoute(route)
+        call.resolve()
+    }
+
+    /// iOS has no full-screen-intent permission: CallKit presents the
+    /// incoming-call UI over the lock screen natively. Always granted.
+    @objc func canUseFullScreenIntent(_ call: CAPPluginCall) {
+        call.resolve(["granted": true])
+    }
+
+    /// Nothing to open on iOS (see canUseFullScreenIntent).
+    @objc func openFullScreenIntentSettings(_ call: CAPPluginCall) {
         call.resolve()
     }
 

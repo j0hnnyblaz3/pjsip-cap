@@ -395,8 +395,18 @@ export class PjsipWeb extends WebPlugin implements PjsipPlugin {
     // No-op on web
   }
 
+  // Web browsers present their own incoming-call UX; no OS permission
+  // gates full-screen presentation.
+  async canUseFullScreenIntent(): Promise<{ granted: boolean }> {
+    return { granted: true };
+  }
+
+  async openFullScreenIntentSettings(): Promise<void> {
+    // No-op on web (see canUseFullScreenIntent).
+  }
+
+  // Web has limited audio routing control — only speaker toggle via setSinkId
   async setAudioRoute(options: { route: AudioRoute }): Promise<void> {
-    // Web has limited audio routing control — only speaker toggle via setSinkId
     const session = this.sessions.values().next().value;
     if (!session) return;
 
